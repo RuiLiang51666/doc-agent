@@ -5,7 +5,9 @@
   "type": "module",
   "description": "doc-agent 的 GitHub App 后端:webhook 驱动,目标仓库零文件",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "dev": "node --env-file=.env server.mjs",
+    "smee": "npx smee-client -u $SMEE_URL -t http://localhost:3000/api/github/webhooks"
   },
   "engines": {
     "node": ">=20"
