@@ -36,7 +36,7 @@ ${items}
 **评估为无需改动**
 ${skipped || "(无)"}
 
-审批:评论 \`/approve\` 写初稿 · \`/regenerate\` 重出 · \`/skip\` 跳过`;
+审批:在本 Issue 下评论 \`/approve\`,即开始写文档初稿并提 PR。`;
 
 // 标题带上"改什么"的一句话描述(去掉对 shell 危险的字符)
 const title = (plan.title || "更新文档").replace(/["`$\\\n]/g, "").trim().slice(0, 60);

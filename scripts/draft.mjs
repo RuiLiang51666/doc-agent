@@ -1,13 +1,12 @@
 // docs-draft workflow 的脚本:按已批准的计划写初稿,提文档 PR。
-import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
 import { syncTranslation, qaTranslation } from "./translate.mjs";
+import { sh, shRead } from "./sh.mjs";
 
-const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
 
 // 从计划 Issue 解出源 PR 号和待改文件(对应 assess.mjs 写出的格式)
@@ -18,7 +17,7 @@ if (planFiles.length === 0) process.exit(0);
 const branch = `docs/plan-${ISSUE_NUMBER}`;
 
 // 幂等:重复 /approve 时若文档 PR 已建过就跳过,避免重复建分支/PR 报错
-if (sh(`gh pr list --head ${branch} --state all --json number --jq 'length'`).trim() !== "0") {
+if (shRead(`gh pr list --head ${branch} --state all --json number --jq 'length'`).trim() !== "0") {
   console.log(`文档 PR(${branch})已存在,跳过`);
   process.exit(0);
 }
@@ -43,10 +42,10 @@ try {
     editedPaths.filter((p) => p.startsWith("docs/zh/")).map((zh) => syncTranslation(zh, edits))
   );
 
-  const base = sh(`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`).trim();
+  const base = shRead(`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`).trim();
   let prTitle = "";
   try {
-    prTitle = sh(`gh pr view ${prNum} --json title --jq .title`).trim();
+    prTitle = shRead(`gh pr view ${prNum} --json title --jq .title`).trim();
   } catch {}
 
   // 文档改动:复用计划里的"必须更新"清单(去掉勾选框),没有就退回到改动文件列表
@@ -69,12 +68,12 @@ ${changed}
 Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
 
   // 文档 PR 标题复用计划 Issue 的描述性标题(去掉前缀 📝)
-  const issueTitle = sh(`gh issue view ${ISSUE_NUMBER} --json title --jq .title`).trim();
+  const issueTitle = shRead(`gh issue view ${ISSUE_NUMBER} --json title --jq .title`).trim();
   const docTitle = issueTitle.replace(/^📝\s*/, "").replace(/["`$\\]/g, "");
 
   writeFileSync("/tmp/pr.md", body);
   sh(`git commit -aqm "${docTitle}"`);
-  sh(`git push -u origin ${branch}`);
+  shRead(`git push -u origin ${branch}`);
   const out = sh(
     `gh pr create --base ${base} --head ${branch} --title "${docTitle}" --label docs/draft --body-file /tmp/pr.md`
   ).trim();

@@ -1,13 +1,12 @@
 // docs-revise workflow 的脚本:按一条 review comment 做针对性返工。
-import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
 import { syncTranslation, qaTranslation } from "./translate.mjs";
+import { sh, shRead } from "./sh.mjs";
 
-const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { GITHUB_REPOSITORY, PR_NUMBER, COMMENT_ID, COMMENT_BODY, COMMENT_PATH, COMMENT_LINE } =
   process.env;
 
@@ -37,7 +36,7 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
   }
 
   sh(`git commit -aqm "docs: address review comment" -m "Reply to review comment ${COMMENT_ID}."`);
-  sh(`git push`);
+  shRead(`git push`);
   const sha = sh(`git rev-parse --short HEAD`).trim();
 
   // 在该 review 线程下回复
@@ -47,7 +46,7 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
   const [owner, repo] = GITHUB_REPOSITORY.split("/");
   const threadsQuery = `query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{id comments(first:50){nodes{databaseId}}}}}}}`;
   const threads = JSON.parse(
-    sh(`gh api graphql -f query='${threadsQuery}' -f owner=${owner} -f repo=${repo} -F pr=${PR_NUMBER}`)
+    shRead(`gh api graphql -f query='${threadsQuery}' -f owner=${owner} -f repo=${repo} -F pr=${PR_NUMBER}`)
   ).data.repository.pullRequest.reviewThreads.nodes;
   const thread = threads.find((t) => t.comments.nodes.some((c) => String(c.databaseId) === COMMENT_ID));
   if (thread) {
