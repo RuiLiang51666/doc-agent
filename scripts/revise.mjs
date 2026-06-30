@@ -5,6 +5,7 @@ import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
+import { translate, toEn, qaTranslation } from "./translate.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { GITHUB_REPOSITORY, PR_NUMBER, COMMENT_ID, COMMENT_BODY, COMMENT_PATH, COMMENT_LINE } =
@@ -29,6 +30,15 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
   const { edits } = extractJSON(await callLLM(system, user));
   applyEdits(edits);
 
+  // 若改的是中文 canonical,同步英文镜像
+  const enSync = [];
+  if (COMMENT_PATH.startsWith("docs/zh/")) {
+    const en = toEn(COMMENT_PATH);
+    const t = await translate(COMMENT_PATH);
+    writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
+    enSync.push({ zh: COMMENT_PATH, en });
+  }
+
   sh(`git commit -aqm "docs: address review comment" -m "Reply to review comment ${COMMENT_ID}."`);
   sh(`git push`);
   const sha = sh(`git rev-parse --short HEAD`).trim();
@@ -50,6 +60,15 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
 
   // 改完顺手跑文档审核(拼写/坏链),提示性贴评论
   await runCheck(PR_NUMBER).catch(() => {});
+
+  // 若同步了英文,跑译文质检
+  if (enSync.length) {
+    const report = await qaTranslation(enSync).catch(() => null);
+    if (report) {
+      writeFileSync("/tmp/qa.md", `🌐 **译文质检**(提示性)\n\n${report}`);
+      sh(`gh pr comment ${PR_NUMBER} --body-file /tmp/qa.md`);
+    }
+  }
 } catch (e) {
   // 失败时回到那条 review 评论下留言
   writeFileSync("/tmp/err.md", `⚠️ 按这条评论返工失败:${String(e.message || e).slice(0, 400)}`);

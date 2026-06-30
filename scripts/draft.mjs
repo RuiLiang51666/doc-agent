@@ -5,6 +5,7 @@ import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
+import { translate, toEn, qaTranslation } from "./translate.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
@@ -36,6 +37,15 @@ try {
     await callLLM(system, `批准的计划(Issue #${ISSUE_NUMBER}):\n${ISSUE_BODY}\n\n当前文档:\n${current}`)
   );
   const editedPaths = applyEdits(edits);
+
+  // 同步英文镜像:把改动到的中文 canonical 翻成英文写入 docs/en
+  const enPairs = [];
+  for (const zh of editedPaths.filter((p) => p.startsWith("docs/zh/"))) {
+    const en = toEn(zh);
+    const t = await translate(zh);
+    writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
+    enPairs.push({ zh, en });
+  }
 
   const base = sh(`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`).trim();
   let prTitle = "";
@@ -76,6 +86,15 @@ Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
   // 文档审核(拼写/坏链):提示性贴评论,不阻断
   const docPr = (out.match(/\/pull\/(\d+)/) || [])[1];
   if (docPr) await runCheck(docPr).catch(() => {});
+
+  // 译文质检(LLM-as-judge):准确性/连贯性/翻译腔,提示性贴评论
+  if (docPr && enPairs.length) {
+    const report = await qaTranslation(enPairs).catch(() => null);
+    if (report) {
+      writeFileSync("/tmp/qa.md", `🌐 **译文质检**(提示性)\n\n${report}`);
+      sh(`gh pr comment ${docPr} --body-file /tmp/qa.md`);
+    }
+  }
 } catch (e) {
   // 失败时在计划 Issue 上留言,让人看得见(而不是只在 Actions 里红一下)
   writeFileSync(

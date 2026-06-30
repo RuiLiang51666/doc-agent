@@ -12,7 +12,8 @@ const { PR_NUMBER, PR_TITLE, MERGE_SHA } = process.env;
 const diff = sh(`git diff ${MERGE_SHA}^1 ${MERGE_SHA} -- src`);
 if (!diff.trim()) process.exit(0); // 没动代码,不评估
 
-const docFiles = sh(`git ls-files docs README.md`).trim().split("\n").filter(Boolean);
+// 只评估中文 canonical(docs/zh);英文镜像是译文,由 draft 自动同步,不参与评估
+const docFiles = sh(`git ls-files docs/zh`).trim().split("\n").filter(Boolean);
 const docs = docFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
 
 const system = readFileSync(new URL("../prompts/assess.md", import.meta.url), "utf8");

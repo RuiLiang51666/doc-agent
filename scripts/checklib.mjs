@@ -8,21 +8,27 @@ const cfg = (p) => fileURLToPath(new URL(p, import.meta.url));
 // 在文档 PR 上跑拼写(cspell)+ 坏链(markdown-link-check)检查,结果贴成 PR 评论。
 // 提示性:发现问题只评论提醒,不阻断合并(要硬卡可把本 job 设成 branch protection 必过项)。
 export async function runCheck(prNumber) {
-  const files = sh(`git ls-files 'docs/**/*.md' '*.md'`).trim().split("\n").filter(Boolean);
-  if (files.length === 0) return true;
-  const quoted = files.map((f) => `"${f}"`).join(" ");
+  const allMd = sh(`git ls-files 'docs/**/*.md' '*.md'`).trim().split("\n").filter(Boolean);
+  if (allMd.length === 0) return true;
   const problems = [];
 
-  // 拼写
-  try {
-    sh(`npx --yes cspell@8 --no-progress --no-summary --config ${cfg("../config/cspell.json")} ${quoted}`);
-  } catch (e) {
-    problems.push("**拼写(cspell)**\n```\n" + String(e.stdout || e.message).trim().slice(0, 1500) + "\n```");
+  // 拼写只查英文(cspell 不适合中文);坏链查全部
+  const enMd = sh(`git ls-files 'docs/en/**/*.md' '*.md'`).trim().split("\n").filter(Boolean);
+  if (enMd.length) {
+    try {
+      sh(
+        `npx --yes cspell@8 --no-progress --no-summary --config ${cfg("../config/cspell.json")} ${enMd
+          .map((f) => `"${f}"`)
+          .join(" ")}`
+      );
+    } catch (e) {
+      problems.push("**拼写(cspell)**\n```\n" + String(e.stdout || e.message).trim().slice(0, 1500) + "\n```");
+    }
   }
 
   // 坏链(逐文件)
   const linkErrs = [];
-  for (const f of files) {
+  for (const f of allMd) {
     try {
       sh(`npx --yes markdown-link-check --quiet --config ${cfg("../config/mlc.json")} "${f}"`);
     } catch (e) {
