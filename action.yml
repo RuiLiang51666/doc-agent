@@ -1,0 +1,54 @@
+name: doc-agent
+description: AI 让文档随代码 PR 自动同步 —— 评估 → 计划 → 审批 → 写初稿 → 按评论返工。
+
+inputs:
+  mode:
+    description: "plan | draft | revise"
+    required: true
+  ref:
+    description: "要 checkout 的分支(revise 传 PR 的 head 分支;plan/draft 留空=默认分支)"
+    required: false
+    default: ""
+  github-token:
+    description: "用于开 Issue / PR、推 commit 的 token(一般传 github.token)"
+    required: true
+  llm-api-key:
+    description: "大模型 API key(从 secret 传)"
+    required: true
+  llm-base-url:
+    description: "OpenAI 兼容接口地址"
+    required: false
+    default: "https://open.bigmodel.cn/api/paas/v4"
+  llm-model:
+    required: false
+    default: "glm-4.6"
+
+runs:
+  using: composite
+  steps:
+    # checkout 调用方仓库(=目标仓库)的内容到工作区
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
+        fetch-depth: 0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+    # 跑工具自带的脚本($GITHUB_ACTION_PATH 指向本 Action 仓库的检出目录)
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LLM_API_KEY: ${{ inputs.llm-api-key }}
+        LLM_BASE_URL: ${{ inputs.llm-base-url }}
+        LLM_MODEL: ${{ inputs.llm-model }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        ISSUE_NUMBER: ${{ github.event.issue.number }}
+        ISSUE_BODY: ${{ github.event.issue.body }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+        COMMENT_BODY: ${{ github.event.comment.body }}
+        COMMENT_PATH: ${{ github.event.comment.path }}
+        COMMENT_LINE: ${{ github.event.comment.line }}
+      run: node "$GITHUB_ACTION_PATH/scripts/${{ inputs.mode }}.mjs"
