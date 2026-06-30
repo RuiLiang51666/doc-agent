@@ -4,6 +4,7 @@ const BASE_URL = process.env.LLM_BASE_URL || "https://api.deepseek.com/v1";
 const MODEL = process.env.LLM_MODEL || "deepseek-chat";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS) || 120000; // 每次请求超时,默认 120s
 
 export async function callLLM(system, user) {
   const opts = {
@@ -23,14 +24,18 @@ export async function callLLM(system, user) {
   };
   // 最多 3 次,退避 1s/2s。只对网络异常、429、5xx 重试;4xx(鉴权/参数错)直接抛。
   for (let attempt = 1; ; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT); // 挂住就中止,避免无限等
     let res;
     try {
-      res = await fetch(`${BASE_URL}/chat/completions`, opts);
+      res = await fetch(`${BASE_URL}/chat/completions`, { ...opts, signal: ctrl.signal });
     } catch (e) {
+      clearTimeout(timer);
       if (attempt >= 3) throw e;
       await sleep(2 ** (attempt - 1) * 1000);
       continue;
     }
+    clearTimeout(timer);
     if (res.ok) return (await res.json()).choices[0].message.content;
     const text = await res.text();
     if ((res.status !== 429 && res.status < 500) || attempt >= 3)
