@@ -1,0 +1,16 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "tinylink",
+    "ttl",
+    "frontmatter",
+    "Moonshot",
+    "deepseek",
+    "Kimi",
+    "Octokit",
+    "cspell",
+    "lychee"
+  ],
+  "ignoreRegExpList": ["/`[^`]+`/g", "/```[\\s\\S]*?```/g"]
+}

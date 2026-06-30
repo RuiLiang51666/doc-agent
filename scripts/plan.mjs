@@ -37,5 +37,8 @@ ${skipped || "(无)"}
 
 审批:评论 \`/approve\` 写初稿 · \`/regenerate\` 重出 · \`/skip\` 跳过`;
 
+// 标题带上"改什么"的一句话描述(去掉对 shell 危险的字符)
+const title = (plan.title || "更新文档").replace(/["`$\\\n]/g, "").trim().slice(0, 60);
+
 writeFileSync("/tmp/plan.md", body);
-sh(`gh issue create --title "📝 文档更新计划 — 源自 #${PR_NUMBER}" --label docs/plan --body-file /tmp/plan.md`);
+sh(`gh issue create --title "📝 docs: ${title} (#${PR_NUMBER})" --label docs/plan --body-file /tmp/plan.md`);

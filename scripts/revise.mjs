@@ -3,6 +3,8 @@ import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
+import { loadStyle } from "./style.mjs";
+import { runCheck } from "./checklib.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { GITHUB_REPOSITORY, PR_NUMBER, COMMENT_ID, COMMENT_BODY, COMMENT_PATH, COMMENT_LINE } =
@@ -12,7 +14,10 @@ try {
   sh(`git config user.name docs-bot`);
   sh(`git config user.email docs-bot@users.noreply.github.com`);
 
-  const system = readFileSync(new URL("../prompts/draft.md", import.meta.url), "utf8");
+  const system =
+    readFileSync(new URL("../prompts/draft.md", import.meta.url), "utf8") +
+    "\n\n# 技术写作规范\n" +
+    loadStyle();
   const user = `这是一次返工。reviewer 在 ${COMMENT_PATH}:${COMMENT_LINE} 留言:
 "${COMMENT_BODY}"
 
@@ -42,6 +47,9 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
     const resolveMutation = `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}`;
     sh(`gh api graphql -f query='${resolveMutation}' -f id=${thread.id}`);
   }
+
+  // 改完顺手跑文档审核(拼写/坏链),提示性贴评论
+  await runCheck(PR_NUMBER).catch(() => {});
 } catch (e) {
   // 失败时回到那条 review 评论下留言
   writeFileSync("/tmp/err.md", `⚠️ 按这条评论返工失败:${String(e.message || e).slice(0, 400)}`);

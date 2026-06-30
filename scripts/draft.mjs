@@ -3,6 +3,8 @@ import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
+import { loadStyle } from "./style.mjs";
+import { runCheck } from "./checklib.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
@@ -25,7 +27,10 @@ try {
   sh(`git config user.email docs-bot@users.noreply.github.com`);
   sh(`git switch -c ${branch}`);
 
-  const system = readFileSync(new URL("../prompts/draft.md", import.meta.url), "utf8");
+  const system =
+    readFileSync(new URL("../prompts/draft.md", import.meta.url), "utf8") +
+    "\n\n# 技术写作规范\n" +
+    loadStyle();
   const current = planFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
   const { edits } = extractJSON(
     await callLLM(system, `批准的计划(Issue #${ISSUE_NUMBER}):\n${ISSUE_BODY}\n\n当前文档:\n${current}`)
@@ -57,10 +62,20 @@ ${changed}
 ---
 Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
 
+  // 文档 PR 标题复用计划 Issue 的描述性标题(去掉前缀 📝)
+  const issueTitle = sh(`gh issue view ${ISSUE_NUMBER} --json title --jq .title`).trim();
+  const docTitle = issueTitle.replace(/^📝\s*/, "").replace(/["`$\\]/g, "");
+
   writeFileSync("/tmp/pr.md", body);
-  sh(`git commit -aqm "docs: update for #${prNum}"`);
+  sh(`git commit -aqm "${docTitle}"`);
   sh(`git push -u origin ${branch}`);
-  sh(`gh pr create --base ${base} --head ${branch} --title "docs: update for #${prNum}" --label docs/draft --body-file /tmp/pr.md`);
+  const out = sh(
+    `gh pr create --base ${base} --head ${branch} --title "${docTitle}" --label docs/draft --body-file /tmp/pr.md`
+  ).trim();
+
+  // 文档审核(拼写/坏链):提示性贴评论,不阻断
+  const docPr = (out.match(/\/pull\/(\d+)/) || [])[1];
+  if (docPr) await runCheck(docPr).catch(() => {});
 } catch (e) {
   // 失败时在计划 Issue 上留言,让人看得见(而不是只在 Actions 里红一下)
   writeFileSync(

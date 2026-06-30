@@ -9,6 +9,8 @@
    并给一句理由,**不要开计划**。
 3. 需要改时,逐篇列出文档文件 + 该文件**具体**要改什么(可勾选的清单项)。
 4. 另外单列你**考虑过但决定不改**的文档,各附理由。仍然正确的文字一律不动。
+5. 给一个 `title`:一句话(≤8 个词/字)概括这次**要改什么**,用文档所用的语言,
+   动词开头,如 "记录 has() 接口" / "document the has() method"。只在 update 时给。
 
 只输出 JSON:
-{ "update": bool, "reason": str, "items": [{ "file": str, "change": str }], "skipped": [{ "file": str, "reason": str }] }
+{ "update": bool, "reason": str, "title": str, "items": [{ "file": str, "change": str }], "skipped": [{ "file": str, "reason": str }] }

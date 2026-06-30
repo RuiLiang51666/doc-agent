@@ -1,0 +1,6 @@
+{
+  "ignorePatterns": [{ "pattern": "^#" }],
+  "aliveStatusCodes": [200, 206, 429],
+  "timeout": "10s",
+  "retryOn429": true
+}
