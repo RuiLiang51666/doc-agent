@@ -33,7 +33,8 @@ export async function syncTranslation(zhPath, zhEdits) {
     .join("\n\n");
   try {
     const user = `中文源文件 ${zhPath} 刚做了下列改动:\n\n${changes}\n\n它的英文译文 ${en} 当前内容:\n${readFileSync(en, "utf8")}\n\n请给出对应的英文 search/replace 编辑,使英文跟上这些改动。`;
-    const { edits } = extractJSON(await callLLM(sSys(), user, FAST_MODEL));
+    // 同步是推理任务(定位 + 翻译),用强模型(默认 LLM_MODEL)保正确;输出小,仍比整篇重译快
+    const { edits } = extractJSON(await callLLM(sSys(), user));
     applyEdits(edits.map((e) => ({ path: en, old_string: e.old_string, new_string: e.new_string })));
   } catch {
     await translateFull(zhPath, en); // 增量失败兜底
