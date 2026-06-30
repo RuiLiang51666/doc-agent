@@ -22,6 +22,10 @@ inputs:
   llm-model:
     required: false
     default: "glm-4.6"
+  llm-fast-model:
+    description: "翻译/译文质检用的更快模型(核心文档生成仍用 llm-model 保质量)"
+    required: false
+    default: "glm-4-flash"
 
 runs:
   using: composite
@@ -41,6 +45,7 @@ runs:
         LLM_API_KEY: ${{ inputs.llm-api-key }}
         LLM_BASE_URL: ${{ inputs.llm-base-url }}
         LLM_MODEL: ${{ inputs.llm-model }}
+        LLM_FAST_MODEL: ${{ inputs.llm-fast-model }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}

@@ -38,14 +38,17 @@ try {
   );
   const editedPaths = applyEdits(edits);
 
-  // 同步英文镜像:把改动到的中文 canonical 翻成英文写入 docs/en
-  const enPairs = [];
-  for (const zh of editedPaths.filter((p) => p.startsWith("docs/zh/"))) {
-    const en = toEn(zh);
-    const t = await translate(zh);
-    writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
-    enPairs.push({ zh, en });
-  }
+  // 同步英文镜像:把改动到的中文 canonical 翻成英文写入 docs/en(多文件并行)
+  const enPairs = await Promise.all(
+    editedPaths
+      .filter((p) => p.startsWith("docs/zh/"))
+      .map(async (zh) => {
+        const en = toEn(zh);
+        const t = await translate(zh);
+        writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
+        return { zh, en };
+      })
+  );
 
   const base = sh(`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`).trim();
   let prTitle = "";

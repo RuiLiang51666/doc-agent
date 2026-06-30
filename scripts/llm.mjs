@@ -2,11 +2,13 @@
 // GLM(智谱)、DeepSeek、Kimi(Moonshot)之间切换,无需改其它代码。
 const BASE_URL = process.env.LLM_BASE_URL || "https://api.deepseek.com/v1";
 const MODEL = process.env.LLM_MODEL || "deepseek-chat";
+// 翻译/质检用的更快模型(没配就退回主模型)
+export const FAST_MODEL = process.env.LLM_FAST_MODEL || MODEL;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS) || 120000; // 每次请求超时,默认 120s
 
-export async function callLLM(system, user) {
+export async function callLLM(system, user, model = MODEL) {
   const opts = {
     method: "POST",
     headers: {
@@ -14,7 +16,7 @@ export async function callLLM(system, user) {
       Authorization: `Bearer ${process.env.LLM_API_KEY}`,
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       temperature: 0,
       messages: [
         { role: "system", content: system },
