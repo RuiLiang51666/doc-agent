@@ -5,7 +5,7 @@ import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
-import { translate, toEn, qaTranslation } from "./translate.mjs";
+import { syncTranslation, qaTranslation } from "./translate.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
@@ -38,16 +38,9 @@ try {
   );
   const editedPaths = applyEdits(edits);
 
-  // 同步英文镜像:把改动到的中文 canonical 翻成英文写入 docs/en(多文件并行)
+  // 增量同步英文镜像:只把本次中文改动反映到 docs/en(多文件并行)
   const enPairs = await Promise.all(
-    editedPaths
-      .filter((p) => p.startsWith("docs/zh/"))
-      .map(async (zh) => {
-        const en = toEn(zh);
-        const t = await translate(zh);
-        writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
-        return { zh, en };
-      })
+    editedPaths.filter((p) => p.startsWith("docs/zh/")).map((zh) => syncTranslation(zh, edits))
   );
 
   const base = sh(`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`).trim();

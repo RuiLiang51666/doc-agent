@@ -5,7 +5,7 @@ import { callLLM, extractJSON } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
-import { translate, toEn, qaTranslation } from "./translate.mjs";
+import { syncTranslation, qaTranslation } from "./translate.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { GITHUB_REPOSITORY, PR_NUMBER, COMMENT_ID, COMMENT_BODY, COMMENT_PATH, COMMENT_LINE } =
@@ -30,13 +30,10 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
   const { edits } = extractJSON(await callLLM(system, user));
   applyEdits(edits);
 
-  // 若改的是中文 canonical,同步英文镜像
+  // 若改的是中文 canonical,增量同步英文镜像
   const enSync = [];
   if (COMMENT_PATH.startsWith("docs/zh/")) {
-    const en = toEn(COMMENT_PATH);
-    const t = await translate(COMMENT_PATH);
-    writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
-    enSync.push({ zh: COMMENT_PATH, en });
+    enSync.push(await syncTranslation(COMMENT_PATH, edits));
   }
 
   sh(`git commit -aqm "docs: address review comment" -m "Reply to review comment ${COMMENT_ID}."`);
