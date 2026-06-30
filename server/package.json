@@ -1,0 +1,17 @@
+{
+  "name": "doc-agent-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "doc-agent 的 GitHub App 后端:webhook 驱动,目标仓库零文件",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@octokit/app": "^15.1.6",
+    "@octokit/webhooks": "^13.4.1"
+  }
+}
