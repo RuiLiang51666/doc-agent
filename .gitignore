@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# 密钥与环境变量(纵深防御:根目录也兜底,防止误提交)
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# 系统/编辑器
+.DS_Store
+*.log
