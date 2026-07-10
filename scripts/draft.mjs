@@ -1,6 +1,6 @@
 // docs-draft workflow 的脚本:按已批准的计划写初稿,提文档 PR。
 import { readFileSync, writeFileSync } from "node:fs";
-import { callLLM, parseStage, modelFor } from "./llm.mjs";
+import { runStage } from "./llm.mjs";
 import { readContract, stripContracts } from "./contract.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
@@ -38,14 +38,11 @@ try {
     loadStyle();
   const current = planFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
   // 喂模型前剥掉契约块(内部数据,不是给模型读的正文)
-  const { edits } = parseStage(
-    await callLLM(
-      system,
-      `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n当前文档:\n${current}`,
-      modelFor("draft")
-    ),
-    "edits"
-  );
+  const { edits } = await runStage({
+    stage: "draft",
+    system,
+    user: `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n当前文档:\n${current}`,
+  });
   const editedPaths = applyEdits(edits);
 
   // 增量同步英文镜像:只把本次中文改动反映到 docs/en(多文件并行)

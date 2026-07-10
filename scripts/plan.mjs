@@ -1,7 +1,7 @@
 // docs-plan workflow 的脚本:评估文档影响,有影响就开计划 Issue。
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { callLLM, parseStage, modelFor } from "./llm.mjs";
+import { runStage } from "./llm.mjs";
 import { embedContract } from "./contract.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
@@ -18,10 +18,11 @@ const docFiles = sh(`git ls-files docs/zh`).trim().split("\n").filter(Boolean);
 const docs = docFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
 
 const system = readFileSync(new URL("../prompts/assess.md", import.meta.url), "utf8");
-const plan = parseStage(
-  await callLLM(system, `PR #${PR_NUMBER} (${PR_TITLE}) diff:\n${diff}\n\n现有文档:\n${docs}`, modelFor("plan")),
-  "plan"
-);
+const plan = await runStage({
+  stage: "plan",
+  system,
+  user: `PR #${PR_NUMBER} (${PR_TITLE}) diff:\n${diff}\n\n现有文档:\n${docs}`,
+});
 
 if (!plan.update) {
   console.log(`Docs ✓ 无需更新 — ${plan.reason}`);

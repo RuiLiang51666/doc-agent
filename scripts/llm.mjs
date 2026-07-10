@@ -126,3 +126,25 @@ export function parseStage(text, shape) {
   if (!validate) throw new Error(`未知 schema:${shape}`);
   return validate(extractJSON(text));
 }
+
+// ── 阶段收口(方案 A ④)──
+// 每个阶段的输出形态(有的是结构化 JSON,有的是纯文本);null = 不校验、原样返回文本。
+const STAGE_SHAPE = {
+  plan: "plan",
+  draft: "edits",
+  revise: "edits",
+  sync: "sync",
+  translate: null, // 整篇译文,纯文本
+  qa: null,        // 译文质检报告,纯文本
+};
+
+/**
+ * 一个阶段一把收:选模型(modelFor)→ 调模型(callLLM)→ 按 STAGE_SHAPE 解析校验(parseStage)。
+ * 各阶段脚本因此瘦成「构造输入 → runStage → 应用输出」。
+ * @returns 有 shape 的阶段返回校验后的对象;无 shape 的返回模型原始文本。
+ */
+export async function runStage({ stage, system, user }) {
+  const raw = await callLLM(system, user, modelFor(stage));
+  const shape = STAGE_SHAPE[stage];
+  return shape ? parseStage(raw, shape) : raw;
+}
