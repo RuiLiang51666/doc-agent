@@ -1,7 +1,8 @@
 // docs-plan workflow 的脚本:评估文档影响,有影响就开计划 Issue。
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { callLLM, extractJSON } from "./llm.mjs";
+import { callLLM, parseStage, modelFor } from "./llm.mjs";
+import { embedContract } from "./contract.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const { PR_NUMBER, PR_TITLE, MERGE_SHA } = process.env;
@@ -17,8 +18,9 @@ const docFiles = sh(`git ls-files docs/zh`).trim().split("\n").filter(Boolean);
 const docs = docFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
 
 const system = readFileSync(new URL("../prompts/assess.md", import.meta.url), "utf8");
-const plan = extractJSON(
-  await callLLM(system, `PR #${PR_NUMBER} (${PR_TITLE}) diff:\n${diff}\n\n现有文档:\n${docs}`)
+const plan = parseStage(
+  await callLLM(system, `PR #${PR_NUMBER} (${PR_TITLE}) diff:\n${diff}\n\n现有文档:\n${docs}`, modelFor("plan")),
+  "plan"
 );
 
 if (!plan.update) {
@@ -36,7 +38,13 @@ ${items}
 **评估为无需改动**
 ${skipped || "(无)"}
 
-审批:在本 Issue 下评论 \`/approve\`,即开始写文档初稿并提 PR。`;
+审批:在本 Issue 下评论 \`/approve\`,即开始写文档初稿并提 PR。` +
+  // 机读契约:draft 阶段据此拿源 PR 号与待改文件,不再正则抠正文(方案 A ①)
+  embedContract("plan", {
+    sourcePr: Number(PR_NUMBER),
+    items: plan.items,
+    skipped: plan.skipped || [],
+  });
 
 // 标题带上"改什么"的一句话描述(去掉对 shell 危险的字符)
 const title = (plan.title || "更新文档").replace(/["`$\\\n]/g, "").trim().slice(0, 60);

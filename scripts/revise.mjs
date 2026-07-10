@@ -1,6 +1,6 @@
 // docs-revise workflow 的脚本:按一条 review comment 做针对性返工。
 import { readFileSync, writeFileSync } from "node:fs";
-import { callLLM, extractJSON } from "./llm.mjs";
+import { callLLM, parseStage, modelFor } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
@@ -26,7 +26,7 @@ try {
 当前文件 ${COMMENT_PATH}:
 ${readFileSync(COMMENT_PATH, "utf8")}`;
 
-  const { edits } = extractJSON(await callLLM(system, user));
+  const { edits } = parseStage(await callLLM(system, user, modelFor("revise")), "edits");
   applyEdits(edits);
 
   // 若改的是中文 canonical,增量同步英文镜像

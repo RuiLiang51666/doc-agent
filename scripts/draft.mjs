@@ -1,6 +1,7 @@
 // docs-draft workflow 的脚本:按已批准的计划写初稿,提文档 PR。
 import { readFileSync, writeFileSync } from "node:fs";
-import { callLLM, extractJSON } from "./llm.mjs";
+import { callLLM, parseStage, modelFor } from "./llm.mjs";
+import { readContract, stripContracts } from "./contract.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
@@ -9,9 +10,13 @@ import { sh, shRead } from "./sh.mjs";
 
 const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
 
-// 从计划 Issue 解出源 PR 号和待改文件(对应 assess.mjs 写出的格式)
-const prNum = (ISSUE_BODY.match(/#(\d+)/) || [])[1];
-const planFiles = [...ISSUE_BODY.matchAll(/- \[ \] `([^`]+)`/g)].map((m) => m[1]);
+// 从计划 Issue 解出源 PR 号和待改文件:优先读机读契约(方案 A ①),
+// 读不到(嵌契约之前建的存量 Issue)则回退到正则抠正文。
+const contract = readContract("plan", ISSUE_BODY);
+const prNum = contract ? String(contract.sourcePr) : (ISSUE_BODY.match(/#(\d+)/) || [])[1];
+const planFiles = contract
+  ? contract.items.map((i) => i.file)
+  : [...ISSUE_BODY.matchAll(/- \[ \] `([^`]+)`/g)].map((m) => m[1]);
 if (planFiles.length === 0) process.exit(0);
 
 const branch = `docs/plan-${ISSUE_NUMBER}`;
@@ -32,8 +37,14 @@ try {
     "\n\n# 技术写作规范\n" +
     loadStyle();
   const current = planFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
-  const { edits } = extractJSON(
-    await callLLM(system, `批准的计划(Issue #${ISSUE_NUMBER}):\n${ISSUE_BODY}\n\n当前文档:\n${current}`)
+  // 喂模型前剥掉契约块(内部数据,不是给模型读的正文)
+  const { edits } = parseStage(
+    await callLLM(
+      system,
+      `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n当前文档:\n${current}`,
+      modelFor("draft")
+    ),
+    "edits"
   );
   const editedPaths = applyEdits(edits);
 
@@ -48,12 +59,14 @@ try {
     prTitle = shRead(`gh pr view ${prNum} --json title --jq .title`).trim();
   } catch {}
 
-  // 文档改动:复用计划里的"必须更新"清单(去掉勾选框),没有就退回到改动文件列表
+  // 文档改动清单:有契约就直接用其 items;否则复用计划正文的"必须更新"段(去勾选框),再退回改动文件列表
   const planItems = ((ISSUE_BODY.match(/\*\*必须更新\*\*\s*\n([\s\S]*?)\n\s*\n/) || [, ""])[1] || "").replace(
     /- \[ \] /g,
     "- "
   );
-  const changed = planItems || editedPaths.map((p) => "- `" + p + "`").join("\n");
+  const changed = contract
+    ? contract.items.map((i) => `- \`${i.file}\` — ${i.change}`).join("\n")
+    : planItems || editedPaths.map((p) => "- `" + p + "`").join("\n");
 
   const body = `## 背景
 依据已合并的代码改动 **#${prNum}${prTitle ? ` — ${prTitle}` : ""}** 自动更新文档,执行已批准的计划 #${ISSUE_NUMBER}。

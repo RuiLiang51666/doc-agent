@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { callLLM, FAST_MODEL, extractJSON } from "./llm.mjs";
+import { callLLM, parseStage, modelFor } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
 
 const tSys = () => readFileSync(new URL("../prompts/translate.md", import.meta.url), "utf8");
@@ -14,7 +14,7 @@ async function translateFull(zhPath, en) {
   const t = await callLLM(
     tSys(),
     `把下面这篇中文技术文档翻译成英文,只输出译文全文:\n\n${readFileSync(zhPath, "utf8")}`,
-    FAST_MODEL
+    modelFor("translate")
   );
   writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
 }
@@ -33,8 +33,8 @@ export async function syncTranslation(zhPath, zhEdits) {
     .join("\n\n");
   try {
     const user = `中文源文件 ${zhPath} 刚做了下列改动:\n\n${changes}\n\n它的英文译文 ${en} 当前内容:\n${readFileSync(en, "utf8")}\n\n请给出对应的英文 search/replace 编辑,使英文跟上这些改动。`;
-    // 同步是推理任务(定位 + 翻译),用强模型(默认 LLM_MODEL)保正确;输出小,仍比整篇重译快
-    const { edits } = extractJSON(await callLLM(sSys(), user));
+    // 同步是推理任务(定位 + 翻译),用强模型保正确;输出小,仍比整篇重译快
+    const { edits } = parseStage(await callLLM(sSys(), user, modelFor("sync")), "sync");
     applyEdits(edits.map((e) => ({ path: en, old_string: e.old_string, new_string: e.new_string })));
   } catch {
     await translateFull(zhPath, en); // 增量失败兜底
@@ -50,5 +50,5 @@ export async function qaTranslation(pairs) {
         `=== ${p.zh}(中文原文)===\n${readFileSync(p.zh, "utf8")}\n\n=== ${p.en}(英文译文)===\n${readFileSync(p.en, "utf8")}`
     )
     .join("\n\n");
-  return await callLLM(qSys(), blocks, FAST_MODEL);
+  return await callLLM(qSys(), blocks, modelFor("qa"));
 }

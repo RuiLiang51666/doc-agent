@@ -5,6 +5,23 @@ const MODEL = process.env.LLM_MODEL || "deepseek-chat";
 // 翻译/质检用的更快模型(没配就退回主模型)
 export const FAST_MODEL = process.env.LLM_FAST_MODEL || MODEL;
 
+// ── 分阶段模型(方案 A ③)──
+// 强模型(推理/定位/生成)vs 快模型(机械翻译/判断)。默认档位 == 历史行为;
+// 可用 LLM_MODEL_<STAGE>(如 LLM_MODEL_PLAN)对单个阶段单独覆盖,方便调优。
+const STAGE_TIER = {
+  plan: "strong",
+  draft: "strong",
+  revise: "strong",
+  sync: "strong",     // 增量同步是「定位 + 翻译」的推理任务,用强模型保正确
+  translate: "fast",  // 整篇机械翻译
+  qa: "fast",         // 译文质检(LLM-as-judge)
+};
+export function modelFor(stage) {
+  const override = process.env[`LLM_MODEL_${String(stage).toUpperCase()}`];
+  if (override) return override;
+  return STAGE_TIER[stage] === "fast" ? FAST_MODEL : MODEL;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS) || 120000; // 每次请求超时,默认 120s
 
@@ -58,4 +75,54 @@ export function extractJSON(text) {
     if (s !== -1 && e > s) return JSON.parse(text.slice(s, e + 1));
     throw new Error(`无法从模型输出解析 JSON:${text.slice(0, 120)}`);
   }
+}
+
+// ── 每阶段 JSON schema 快速失败(方案 A ②)──
+// 只校验「代码真正会读的字段」,缺字段/类型错就指名报错 —— 让模型跑偏时更早、更清楚地失败,
+// 而不是流到 applyEdits 抛神秘错。手写校验、不引依赖。
+function assert(cond, msg) {
+  if (!cond) throw new Error(`模型输出不符合约定:${msg}`);
+}
+const isArr = Array.isArray;
+const isStr = (v) => typeof v === "string";
+
+const SHAPES = {
+  // assess.md 输出:是否需要更新 + 待改文件清单
+  plan(o) {
+    assert(o && typeof o === "object", "顶层应为对象");
+    assert(typeof o.update === "boolean", "缺字段 update(布尔)");
+    if (o.update) {
+      assert(isArr(o.items) && o.items.length, "update=true 时 items 应为非空数组");
+      o.items.forEach((it, i) =>
+        assert(it && isStr(it.file) && isStr(it.change), `items[${i}] 需含字符串 file / change`)
+      );
+    }
+    return o;
+  },
+  // draft/revise 输出:search/replace 编辑对(含目标文件 path)
+  edits(o) {
+    assert(o && isArr(o.edits), "缺 edits 数组");
+    o.edits.forEach((e, i) =>
+      assert(
+        e && isStr(e.path) && isStr(e.old_string) && isStr(e.new_string),
+        `edits[${i}] 需含字符串 path / old_string / new_string`
+      )
+    );
+    return o;
+  },
+  // translate-sync 输出:英文侧编辑对(path 由调用方补,故此处不校验 path)
+  sync(o) {
+    assert(o && isArr(o.edits), "缺 edits 数组");
+    o.edits.forEach((e, i) =>
+      assert(e && isStr(e.old_string) && isStr(e.new_string), `edits[${i}] 需含字符串 old_string / new_string`)
+    );
+    return o;
+  },
+};
+
+/** 解析模型输出并按阶段 schema 校验;shape ∈ plan|edits|sync。 */
+export function parseStage(text, shape) {
+  const validate = SHAPES[shape];
+  if (!validate) throw new Error(`未知 schema:${shape}`);
+  return validate(extractJSON(text));
 }
