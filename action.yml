@@ -26,6 +26,39 @@ inputs:
     description: "翻译/译文质检用的更快模型(核心文档生成仍用 llm-model 保质量)"
     required: false
     default: "glm-4-flash"
+  # ── 路径与语言(默认 == 历史行为:代码 src、中文 docs/zh、英文 docs/en、*.md)──
+  code-paths:
+    description: "代码路径 glob,换行或逗号分隔;** 跨目录,! 或 :! 开头为排除(如 apollo-*/src/main/java 与 :!**/src/test/**)。只有这些文件的改动才触发文档评估"
+    required: false
+    default: "src"
+  docs-source-dir:
+    description: "源语言(canonical)文档目录;仓库根目录写 ."
+    required: false
+    default: "docs/zh"
+  docs-target-dir:
+    description: "译文镜像目录,与源文档同相对路径(如 docs/en;KWDB 式「根目录中文 → en/」写 en)。位于源目录之内时自动从源文档里排除"
+    required: false
+    default: "docs/en"
+  docs-glob:
+    description: "文档文件名通配,换行或逗号分隔(顺带滤掉图片);拼写/坏链检查也按它取文件"
+    required: false
+    default: "*.md"
+  docs-exclude:
+    description: "从源文档里排除的路径 glob,换行或逗号分隔(如 README.md, .github/**)"
+    required: false
+    default: ""
+  source-lang:
+    description: "源语言 zh | en(译文同步目前只支持 zh → en)"
+    required: false
+    default: "zh"
+  plan-token-budget:
+    description: "plan 阶段输入(提示词 + diff + 文档索引 + 文档全文)的估算 token 上限;文档按相关度在预算内取舍,固定部分就放不下时失败并在 PR 下回帖"
+    required: false
+    default: "60000"
+  diff-token-budget:
+    description: "代码 diff 的估算 token 上限(plan 与 draft 共用);超出时按文件截断并标注「已截断」"
+    required: false
+    default: "20000"
 
 runs:
   using: composite
@@ -46,6 +79,14 @@ runs:
         LLM_BASE_URL: ${{ inputs.llm-base-url }}
         LLM_MODEL: ${{ inputs.llm-model }}
         LLM_FAST_MODEL: ${{ inputs.llm-fast-model }}
+        CODE_PATHS: ${{ inputs.code-paths }}
+        DOCS_SOURCE_DIR: ${{ inputs.docs-source-dir }}
+        DOCS_TARGET_DIR: ${{ inputs.docs-target-dir }}
+        DOCS_GLOB: ${{ inputs.docs-glob }}
+        DOCS_EXCLUDE: ${{ inputs.docs-exclude }}
+        SOURCE_LANG: ${{ inputs.source-lang }}
+        PLAN_TOKEN_BUDGET: ${{ inputs.plan-token-budget }}
+        DIFF_TOKEN_BUDGET: ${{ inputs.diff-token-budget }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}

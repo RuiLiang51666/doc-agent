@@ -1,53 +1,62 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { runStage } from "./llm.mjs";
 import { applyEdits } from "./edits.mjs";
+import { loadConfig, toTarget } from "./config.mjs";
 
 const tSys = () => readFileSync(new URL("../prompts/translate.md", import.meta.url), "utf8");
 const sSys = () => readFileSync(new URL("../prompts/translate-sync.md", import.meta.url), "utf8");
 const qSys = () => readFileSync(new URL("../prompts/translate-qa.md", import.meta.url), "utf8");
 
-// 中文 canonical 路径 → 英文镜像路径
-export const toEn = (zhPath) => zhPath.replace(/^docs\/zh\//, "docs/en/");
+// 译文方向与镜像路径来自配置(source-lang、docs-source-dir → docs-target-dir)。
+// 内置翻译提示词只覆盖「中文 → 英文」:其它方向明确报错(由 draft/revise 的失败回帖兜住),不静默产出错向译文。
+function translationConfig() {
+  const cfg = loadConfig();
+  if (cfg.sourceLang !== "zh")
+    throw new Error(`暂不支持 source-lang=${cfg.sourceLang} 的译文同步:内置翻译提示词只覆盖中文 → 英文`);
+  return cfg;
+}
 
-// 整篇翻译(英文镜像不存在的新文档,或增量失败兜底)
-async function translateFull(zhPath, en) {
+// 整篇翻译(译文镜像不存在的新文档,或增量失败兜底)
+async function translateFull(srcPath, dst, cfg) {
   const t = await runStage({
     stage: "translate",
     system: tSys(),
-    user: `把下面这篇中文技术文档翻译成英文,只输出译文全文:\n\n${readFileSync(zhPath, "utf8")}`,
+    user: `把下面这篇${cfg.sourceName}技术文档翻译成${cfg.targetName},只输出译文全文:\n\n${readFileSync(srcPath, "utf8")}`,
   });
-  writeFileSync(en, t.endsWith("\n") ? t : t + "\n");
+  writeFileSync(dst, t.endsWith("\n") ? t : t + "\n");
 }
 
-// 增量同步:只把中文这次的改动反映到英文译文(产出最小 en diff)。
-// 英文镜像不存在 → 整篇翻译;增量编辑失败 → 整篇重译兜底。
-export async function syncTranslation(zhPath, zhEdits) {
-  const en = toEn(zhPath);
-  if (!existsSync(en)) {
-    await translateFull(zhPath, en);
-    return { zh: zhPath, en };
+// 增量同步:只把源文档这次的改动反映到译文(产出最小译文 diff)。
+// 译文镜像不存在 → 整篇翻译;增量编辑失败 → 整篇重译兜底。
+export async function syncTranslation(srcPath, srcEdits) {
+  const cfg = translationConfig();
+  const dst = toTarget(srcPath, cfg);
+  if (!existsSync(dst)) {
+    await translateFull(srcPath, dst, cfg);
+    return { source: srcPath, target: dst };
   }
-  const changes = zhEdits
-    .filter((e) => e.path === zhPath)
-    .map((e) => `【原中文】\n${e.old_string}\n【改为】\n${e.new_string}`)
+  const changes = srcEdits
+    .filter((e) => e.path === srcPath)
+    .map((e) => `【原${cfg.sourceName}】\n${e.old_string}\n【改为】\n${e.new_string}`)
     .join("\n\n");
   try {
-    const user = `中文源文件 ${zhPath} 刚做了下列改动:\n\n${changes}\n\n它的英文译文 ${en} 当前内容:\n${readFileSync(en, "utf8")}\n\n请给出对应的英文 search/replace 编辑,使英文跟上这些改动。`;
+    const user = `${cfg.sourceName}源文件 ${srcPath} 刚做了下列改动:\n\n${changes}\n\n它的${cfg.targetName}译文 ${dst} 当前内容:\n${readFileSync(dst, "utf8")}\n\n请给出对应的${cfg.targetName} search/replace 编辑,使${cfg.targetName}跟上这些改动。`;
     // 同步是推理任务(定位 + 翻译),用强模型保正确;输出小,仍比整篇重译快
     const { edits } = await runStage({ stage: "sync", system: sSys(), user });
-    applyEdits(edits.map((e) => ({ path: en, old_string: e.old_string, new_string: e.new_string })));
+    applyEdits(edits.map((e) => ({ path: dst, old_string: e.old_string, new_string: e.new_string })));
   } catch {
-    await translateFull(zhPath, en); // 增量失败兜底
+    await translateFull(srcPath, dst, cfg); // 增量失败兜底
   }
-  return { zh: zhPath, en };
+  return { source: srcPath, target: dst };
 }
 
 // 译文质检(LLM-as-judge):准确性/连贯性/翻译腔
 export async function qaTranslation(pairs) {
+  const cfg = translationConfig();
   const blocks = pairs
     .map(
       (p) =>
-        `=== ${p.zh}(中文原文)===\n${readFileSync(p.zh, "utf8")}\n\n=== ${p.en}(英文译文)===\n${readFileSync(p.en, "utf8")}`
+        `=== ${p.source}(${cfg.sourceName}原文)===\n${readFileSync(p.source, "utf8")}\n\n=== ${p.target}(${cfg.targetName}译文)===\n${readFileSync(p.target, "utf8")}`
     )
     .join("\n\n");
   return await runStage({ stage: "qa", system: qSys(), user: blocks });

@@ -1,6 +1,7 @@
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "./config.mjs";
 
 const sh = (cmd) => execSync(cmd, { encoding: "utf8" });
 const cfg = (p) => fileURLToPath(new URL(p, import.meta.url));
@@ -8,12 +9,20 @@ const cfg = (p) => fileURLToPath(new URL(p, import.meta.url));
 // 在文档 PR 上跑拼写(cspell)+ 坏链(markdown-link-check)检查,结果贴成 PR 评论。
 // 提示性:发现问题只评论提醒,不阻断合并(要硬卡可把本 job 设成 branch protection 必过项)。
 export async function runCheck(prNumber) {
-  const allMd = sh(`git ls-files 'docs/**/*.md' '*.md'`).trim().split("\n").filter(Boolean);
+  // 检查范围 = docs-glob(默认 *.md)。git pathspec 里的 * 会跨目录,所以默认就是全仓 md——
+  // 与历史写死的 'docs/**/*.md' '*.md'(拼写那份 'docs/en/**/*.md' '*.md' 也一样)完全等价。
+  // -z:中文文件名不被 git 转义;只查本次改动的增量质检留待后续。
+  const allMd = execFileSync("git", ["ls-files", "-z", "--", ...loadConfig().docsGlobs], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  })
+    .split("\0")
+    .filter(Boolean);
   if (allMd.length === 0) return true;
   const problems = [];
 
-  // 拼写只查英文(cspell 不适合中文);坏链查全部
-  const enMd = sh(`git ls-files 'docs/en/**/*.md' '*.md'`).trim().split("\n").filter(Boolean);
+  // 拼写(cspell)与坏链用同一份清单,与历史行为一致
+  const enMd = allMd;
   if (enMd.length) {
     try {
       sh(

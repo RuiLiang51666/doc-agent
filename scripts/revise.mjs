@@ -6,6 +6,7 @@ import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
 import { syncTranslation, qaTranslation } from "./translate.mjs";
 import { sh, shRead } from "./sh.mjs";
+import { loadConfig, isSourceDoc } from "./config.mjs";
 
 const { GITHUB_REPOSITORY, PR_NUMBER, COMMENT_ID, COMMENT_BODY, COMMENT_PATH, COMMENT_LINE } =
   process.env;
@@ -29,9 +30,9 @@ ${readFileSync(COMMENT_PATH, "utf8")}`;
   const { edits } = await runStage({ stage: "revise", system, user });
   applyEdits(edits);
 
-  // 若改的是中文 canonical,增量同步英文镜像
+  // 若改的是源语言文档(canonical,目录与通配见配置),增量同步译文镜像
   const enSync = [];
-  if (COMMENT_PATH.startsWith("docs/zh/")) {
+  if (isSourceDoc(COMMENT_PATH, loadConfig())) {
     enSync.push(await syncTranslation(COMMENT_PATH, edits));
   }
 

@@ -31,7 +31,18 @@ export LLM_API_KEY=你的GLM_key                      # LLM_MODEL/LLM_FAST_MODEL
 npm start
 ```
 
-目标仓库仍需有 `docs/plan`、`docs/draft` 两个 label,以及中文 canonical 文档在 `docs/zh/`。
+目标仓库仍需有 `docs/plan`、`docs/draft` 两个 label。
+
+路径、语言与预算配置和 Actions 版的 inputs 一一对应:在后端进程上设同名环境变量即可,不设就用默认值(即历史行为:
+代码 `src/`、中文 `docs/zh/`、英文 `docs/en/`)。含义见根目录 [README 的「配置」](../README.md#配置)。
+
+```bash
+export CODE_PATHS=$'apollo-*/src/**\nscripts/**\n:!**/src/test/**'   # 默认 src
+export DOCS_SOURCE_DIR=docs/zh DOCS_TARGET_DIR=docs/en               # 默认即此;KWDB 式写 . 与 en
+export PLAN_TOKEN_BUDGET=60000 DIFF_TOKEN_BUDGET=20000               # 默认即此
+```
+
+注意:一个后端进程的配置对它服务的所有安装仓库生效;布局不同的仓库需要分进程部署。
 
 ## 3. 本地开发(没有公网地址时)
 

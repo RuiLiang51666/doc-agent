@@ -56,6 +56,8 @@ async function installationToken(installationId) {
 // 把 webhook payload 映射成脚本要的环境变量(对应原来 action.yml 里的 github.event.*)
 function envFor(p, token) {
   return {
+    // 继承后端进程的环境变量:路径 / 语言 / 预算配置与 action inputs 同名(CODE_PATHS、DOCS_SOURCE_DIR、
+    // DOCS_TARGET_DIR、DOCS_GLOB、DOCS_EXCLUDE、SOURCE_LANG、PLAN_TOKEN_BUDGET、DIFF_TOKEN_BUDGET),由此传给脚本
     ...process.env,
     GH_TOKEN: token,
     LLM_API_KEY,

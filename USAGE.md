@@ -29,11 +29,11 @@
 
 | 项 | 说明 |
 |---|---|
-| 文档结构 | 中文为准放 `docs/zh/`,英文镜像放 `docs/en/`(由机器人自动维护,**别手改**) |
-| 代码↔文档映射 | 在 `docs/zh/*.md` 的 frontmatter 写 `covers:`,列出它覆盖的代码路径(评估时按改动路径反查) |
+| 文档结构 | 默认中文为准放 `docs/zh/`,英文镜像放 `docs/en/` 同路径(由机器人自动维护,**别手改**);其它布局用 `docs-source-dir` / `docs-target-dir` 配置 |
+| 代码↔文档映射 | 可选:在源文档 frontmatter 写 `covers:` 列出覆盖的代码路径,命中改动的文档优先附全文;不写也行,评估时按 diff 里的标识符给文档打分预筛 |
 | 两个标签 | `docs/plan`(计划 Issue)、`docs/draft`(文档 PR)——首次需手动建 |
 | 模型 key | 仓库 secret `LLM_API_KEY`(GLM 等 OpenAI 兼容接口) |
-| 代码/文档布局 | 代码默认在 `src/`,文档在 `docs/`(`scripts/plan.mjs` 里硬编码,换布局改那里) |
+| 代码/文档布局 | 代码默认在 `src/`;换布局用 action inputs(`code-paths` 等)或同名环境变量配置,见 README「配置」 |
 
 ---
 
@@ -84,11 +84,13 @@ jobs:
 | `llm-fast-model` / `LLM_FAST_MODEL` | `glm-4-flash` | 整篇翻译、译文质检(重速度) |
 | `llm-base-url` / `LLM_BASE_URL` | 智谱地址 | 任意 OpenAI 兼容接口,可切 DeepSeek/Kimi |
 | 写作规范 | 内置 `prompts/style.md` | 目标仓库放 `.doc-agent/style.md` 即用自己的家规 |
+| 路径 / 语言 / 预算 | 历史行为 | `code-paths`、`docs-source-dir`、`docs-target-dir`、`docs-glob`、`docs-exclude`、`source-lang`、`plan-token-budget`、`diff-token-budget`,详见 README「配置」 |
 
 ---
 
 ## 五、出问题时
 
+- **评估失败**:机器人会在被合并的代码 PR 下回帖原因类别(超预算 / 模型接口报错 / 模型输出校验失败 / 其他异常);排查后 Re-run 该 job 即可(同一 PR 已有计划 Issue 会自动跳过,不会重复开)。
 - **生成失败**:机器人会在计划 Issue 或那条 review 评论下留言报错;修掉后重新 `/approve`(幂等,不会重复建 PR)即可重试。
 - **网络瞬时抖动**:`gh` 读调用与 `git push` 会自动重试(EOF/超时等);写操作不重试以免重复。
 - **文档 PR 冲突**:文档 PR 还没合并时,别的改动又落地了同一篇 → 当普通冲突解决(把主分支合进文档 PR 分支)。

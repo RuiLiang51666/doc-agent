@@ -7,6 +7,9 @@ import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
 import { syncTranslation, qaTranslation } from "./translate.mjs";
 import { sh, shRead } from "./sh.mjs";
+import { loadConfig, isSourceDoc } from "./config.mjs";
+import { codeChangedFiles, diffFilesFor } from "./diff.mjs";
+import { buildDiffText } from "./budget.mjs";
 
 const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
 
@@ -37,17 +40,27 @@ try {
     "\n\n# 技术写作规范\n" +
     loadStyle();
   const current = planFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
+
+  // 已合并的代码 diff:配置项名、默认值、行为边界只在代码里,不给就只能靠猜。
+  // 合并提交优先取契约;存量 Issue 抠正文 "@ <sha>";再不行问 GitHub。受 diff 预算约束,超出按文件截断并标注。
+  const cfg = loadConfig();
+  const mergeSha =
+    contract?.mergeSha ||
+    (ISSUE_BODY.match(/@ ([0-9a-f]{7,40})\b/) || [])[1] ||
+    shRead(`gh pr view ${prNum} --json mergeCommit --jq .mergeCommit.oid`).trim();
+  const codeDiff = buildDiffText(diffFilesFor(mergeSha, codeChangedFiles(mergeSha, cfg)), cfg.diffTokenBudget);
+
   // 喂模型前剥掉契约块(内部数据,不是给模型读的正文)
   const { edits } = await runStage({
     stage: "draft",
     system,
-    user: `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n当前文档:\n${current}`,
+    user: `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n已合并的代码 diff(源 PR #${prNum} @ ${mergeSha.slice(0, 12)}):\n${codeDiff.text || "(配置的代码路径下没有改动)"}\n\n当前文档:\n${current}`,
   });
   const editedPaths = applyEdits(edits);
 
-  // 增量同步英文镜像:只把本次中文改动反映到 docs/en(多文件并行)
+  // 增量同步译文镜像:只把本次源语言文档的改动反映到译文目录(多文件并行)
   const enPairs = await Promise.all(
-    editedPaths.filter((p) => p.startsWith("docs/zh/")).map((zh) => syncTranslation(zh, edits))
+    editedPaths.filter((p) => isSourceDoc(p, cfg)).map((src) => syncTranslation(src, edits))
   );
 
   const base = shRead(`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`).trim();
