@@ -1,5 +1,7 @@
 // 路径与语言配置:action.yml 的 inputs → 环境变量;server 形态直接读同名环境变量。
 // 默认值 == 历史写死的行为(代码 src、中文 docs/zh、英文 docs/en、*.md),老 workflow 不改照跑。
+import { existsSync, realpathSync } from "node:fs";
+import { resolve, dirname, sep } from "node:path";
 
 export const DEFAULTS = {
   CODE_PATHS: "src",
@@ -113,4 +115,42 @@ export function toTarget(path, cfg) {
   if (!underDir(path, cfg.sourceDir)) throw new Error(`${path} 不在源文档目录 ${cfg.sourceDir || "(仓库根)"} 下`);
   const rel = cfg.sourceDir === "" ? path : path.slice(cfg.sourceDir.length + 1);
   return `${cfg.targetDir}/${rel}`;
+}
+
+/**
+ * 仓库内相对路径校验(模型与 Issue 正文给的路径都不可信):不许为空、绝对路径、反斜杠或控制字符、
+ * 「.」「..」或空的路径段、写进 .git。不合规抛错,合规原样返回。
+ */
+export function assertRepoPath(path) {
+  const p = String(path ?? "");
+  const bad = (why) => {
+    throw new Error(`路径不合规(${why}):${p}`);
+  };
+  if (!p) bad("为空");
+  if (/[\\\x00-\x1f]/.test(p)) bad("含反斜杠或控制字符");
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p)) bad("必须是仓库内的相对路径");
+  const segs = p.split("/");
+  if (segs.some((s) => s === "" || s === "." || s === "..")) bad("不许出现 .、.. 或空的路径段");
+  if (segs.includes(".git")) bad("不许写进 .git");
+  return p;
+}
+
+/**
+ * 新建文档的路径校验:先过 assertRepoPath;再要求是源语言文档(在源目录下、命中 docs-glob、不在译文目录、不被排除);
+ * 最后按真实落盘位置核对——从目标往上找到最近一级已存在的目录,解析符号链接后仍须在源文档目录之内。
+ * 不合规抛错,合规返回路径。root = 仓库根(默认当前目录)。
+ */
+export function checkNewDocPath(path, cfg, root = process.cwd()) {
+  const p = assertRepoPath(path);
+  if (!isSourceDoc(p, cfg))
+    throw new Error(
+      `新建文档必须是源文档目录 ${cfg.sourceDir || "(仓库根)"} 下符合 docs-glob 的文件,且不在译文目录、不被 docs-exclude 排除:${p}`
+    );
+  const srcRoot = realpathSync(resolve(root, cfg.sourceDir || "."));
+  let dir = dirname(resolve(root, p));
+  while (!existsSync(dir)) dir = dirname(dir);
+  const real = realpathSync(dir);
+  if (real !== srcRoot && !real.startsWith(srcRoot + sep))
+    throw new Error(`新建文档经符号链接落到了源文档目录之外:${p}`);
+  return p;
 }

@@ -101,3 +101,16 @@ test("buildPlanPrompt:diff 超出 diff 预算按文件截断并标注;固定部�
     (e) => e.code === "DOC_AGENT_BUDGET" && /超出预算 100/.test(e.message)
   );
 });
+
+test("buildPlanPrompt:得分为 0 的文档预算再够也不放全文、只进索引;低分但非 0 的照样放(不设其他相对阈值)", () => {
+  const cfg = loadConfig({ PLAN_TOKEN_BUDGET: "60000", DIFF_TOKEN_BUDGET: "5000" });
+  const docs = [...DOCS, { path: "docs/zh/community/thank-you.md", text: "# 致谢\n\n感谢每一位贡献者。\n" }];
+  const { user, stats } = buildPlanPrompt({ prNumber: 5655, prTitle: "oidc", system: "s", diffFiles: [OIDC_DIFF], docs, codeFiles: [OIDC_DIFF.path], cfg });
+  const zero = stats.ranked.find((d) => d.path === "docs/zh/community/thank-you.md");
+  assert.equal(zero.score, 0);
+  assert.equal(zero.full, false);
+  assert.equal(stats.zeroScore, 1);
+  assert.match(user, /^- docs\/zh\/community\/thank-you\.md — 致谢$/m); // 在索引里,不带 ★
+  assert.ok(!user.includes("=== docs/zh/community/thank-you.md ==="));
+  assert.equal(stats.selected.length, 3); // 其余 3 篇(含靠泛词得低分的 java-sdk-user-guide)都放了全文
+});

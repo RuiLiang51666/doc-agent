@@ -1,14 +1,15 @@
 // docs-plan workflow 的脚本:评估文档影响,有影响就开计划 Issue。
 // 护栏(不静默、幂等):配置的代码路径没改动 → 明确日志 + Step Summary;同一 PR 已有计划 Issue → 跳过;
-// 任何异常(超预算 / 模型接口报错 / schema 校验失败 …)→ 在被合并的代码 PR 下回帖说明原因类别,并以失败退出。
+// 任何异常(超预算 / 模型接口报错 / 输出被截断 / schema 校验失败 …)→ 在被合并的代码 PR 下回帖说明原因类别,并以失败退出。
+// 取 diff 以 GitHub 上该 PR 的提交为准,merge / squash / rebase 合并都对(见 diff.mjs 的 resolveDiffRange)。
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runStage } from "./llm.mjs";
 import { embedContract } from "./contract.mjs";
 import { loadConfig } from "./config.mjs";
-import { codeChangedFiles } from "./diff.mjs";
-import { planInput, findPlanIssue, classifyError, stepSummary, formatStats } from "./planlib.mjs";
+import { codeChangedFiles, resolveDiffRange, describeRange } from "./diff.mjs";
+import { planInput, findPlanIssue, classifyError, stepSummary, formatStats, normalizePlanItems } from "./planlib.mjs";
 import { sh, shRead } from "./sh.mjs";
 
 const { GITHUB_REPOSITORY, PR_NUMBER, PR_TITLE, MERGE_SHA } = process.env;
@@ -27,7 +28,8 @@ const existingPlan = () =>
 
 try {
   const cfg = loadConfig();
-  const codeFiles = codeChangedFiles(MERGE_SHA, cfg);
+  const range = resolveDiffRange({ sha: MERGE_SHA, prNumber: PR_NUMBER, repo: GITHUB_REPOSITORY });
+  const codeFiles = codeChangedFiles(range, cfg);
   if (codeFiles.length === 0) {
     report(`doc-agent plan:PR #${PR_NUMBER} 在配置的代码路径(${cfg.codePaths.join(", ")})下没有改动,跳过文档评估。`);
     process.exit(0);
@@ -41,8 +43,9 @@ try {
   }
 
   // 预筛 + 预算:高相关文档放全文,其余只给「路径 + 标题」索引;固定部分就放不下时抛 BudgetError
-  const { system, user, stats } = planInput({ cfg, sha: MERGE_SHA, prNumber: PR_NUMBER, prTitle: PR_TITLE, codeFiles });
-  console.log(formatStats(stats));
+  const { system, user, stats } = planInput({ cfg, range, prNumber: PR_NUMBER, prTitle: PR_TITLE, codeFiles });
+  const statsLine = `${formatStats(stats)};diff 口径 ${describeRange(range)}`;
+  console.log(statsLine);
 
   const plan = await runStage({ stage: "plan", system, user });
   if (!plan.update) {
@@ -50,7 +53,9 @@ try {
     process.exit(0);
   }
 
-  const items = plan.items.map((i) => `- [ ] \`${i.file}\` — ${i.change}`).join("\n");
+  // 路径校验:不许穿越;当前不存在的文件 = 新建文档,必须落在源文档目录内(不合规归类「模型输出校验失败」)
+  const planItems = normalizePlanItems(plan.items, cfg);
+  const items = planItems.map((i) => `- [ ] \`${i.file}\`${i.create ? "(新建)" : ""} — ${i.change}`).join("\n");
   const skipped = (plan.skipped || []).map((s) => `- \`${s.file}\` — ${s.reason}`).join("\n");
   const body = `源代码变更:#${PR_NUMBER} @ ${MERGE_SHA}
 
@@ -60,14 +65,14 @@ ${items}
 **评估为无需改动**
 ${skipped || "(无)"}
 
-<sub>${formatStats(stats)}</sub>
+<sub>${statsLine}</sub>
 
 审批:在本 Issue 下评论 \`/approve\`,即开始写文档初稿并提 PR。` +
-    // 机读契约:draft 阶段据此拿源 PR 号、合并提交与待改文件,不再正则抠正文(方案 A ①)
+    // 机读契约:draft 阶段据此拿源 PR 号、合并提交与待改文件(新建文档带 create: true),不再正则抠正文(方案 A ①)
     embedContract("plan", {
       sourcePr: Number(PR_NUMBER),
       mergeSha: MERGE_SHA,
-      items: plan.items,
+      items: planItems,
       skipped: plan.skipped || [],
     });
 

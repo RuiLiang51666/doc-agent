@@ -1,5 +1,6 @@
 // plan.mjs 端到端离线测试:临时 git 仓库 + 假 gh(记录每次调用)+ 本机 mock 大模型接口。
-// 覆盖:无代码改动不静默、已有计划 Issue 跳过、各类异常在 PR 下回帖并失败退出、正常开 Issue。
+// 覆盖:无代码改动不静默、已有计划 Issue 跳过、各类异常(含输出被截断)在 PR 下回帖并失败退出、正常开 Issue、
+// rebase 合并按 PR 全部提交取 diff、计划里的新建文档与越界路径。
 // 跑:node --test
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +19,7 @@ const bin = join(root, "bin");
 mkdirSync(repo);
 mkdirSync(bin);
 
-// ── 临时仓库:init → 只改文档的提交 → 改代码的提交 ──
+// ── 临时仓库:init → 只改文档的提交 → 改代码的提交 → 模拟 rebase 合并落下的两个代码提交 ──
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 const put = (p, s) => {
   mkdirSync(dirname(join(repo, p)), { recursive: true });
@@ -30,7 +31,7 @@ git("config", "user.name", "t");
 put("src/cache.js", "export class Cache {\n  get(key) {}\n}\n");
 put("docs/zh/cache.md", "---\ncovers:\n  - src/cache.js\n---\n\n# 内存缓存 Cache\n\n### `get(key)`\n\n读取。\n");
 put("docs/en/cache.md", "# Cache\n\n### `get(key)`\n\nReads a value.\n");
-put("docs/zh/images/arch.png", "PNG 二进制占位");
+put("docs/zh/images/arch.png", "PNG 二进制占位");
 git("add", "-A");
 git("commit", "-qm", "init");
 put("docs/zh/cache.md", "---\ncovers:\n  - src/cache.js\n---\n\n# 内存缓存 Cache\n\n### `get(key)`\n\n读取指定键。\n");
@@ -39,8 +40,20 @@ const DOCS_SHA = git("rev-parse", "HEAD");
 put("src/cache.js", "export class Cache {\n  get(key) {}\n  size() {\n    return this.map.size;\n  }\n}\n");
 git("commit", "-qam", "feat: size()");
 const CODE_SHA = git("rev-parse", "HEAD");
+put("src/cache.js", "export class Cache {\n  get(key) {}\n  size() {\n    return this.map.size;\n  }\n  has(key) {\n    return this.map.has(key);\n  }\n}\n");
+git("commit", "-qam", "feat: has()");
+const HAS_SHA = git("rev-parse", "HEAD");
+put("src/store.js", "export class Store {}\n");
+git("add", "-A");
+git("commit", "-qm", "feat: Store");
+const REBASE_SHA = git("rev-parse", "HEAD");
+const meta = (sha) => {
+  const [date, ...msg] = git("log", "-1", "--format=%aI%n%B", sha).split("\n");
+  return { commit: { message: msg.join("\n").trim(), author: { date } } };
+};
 
-// ── 假 gh:把参数与 --body-file / -F body=@file 的正文记进日志;issue list 返回 FAKE_GH_ISSUES ──
+// ── 假 gh:把参数与 --body-file / -F body=@file 的正文记进日志;issue list 返回 FAKE_GH_ISSUES;
+//    api 读请求(不带 -f / -F)按 FAKE_GH_API({ 路径: 返回值 })回放,没有就按 404 失败 ──
 writeFileSync(
   join(bin, "gh"),
   `#!/usr/bin/env node
@@ -54,11 +67,20 @@ args.forEach((a, i) => {
 fs.appendFileSync(process.env.FAKE_GH_LOG, entry + "\\n");
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(process.env.FAKE_GH_ISSUES || "[]");
 if (args[0] === "issue" && args[1] === "create") process.stdout.write("https://github.com/o/r/issues/99\\n");
+if (args[0] === "api" && !args.includes("-F") && !args.includes("-f")) {
+  const routes = JSON.parse(process.env.FAKE_GH_API || "{}");
+  const path = args[args.length - 1];
+  if (path in routes) process.stdout.write(JSON.stringify(routes[path]));
+  else {
+    process.stderr.write("gh: Not Found (HTTP 404)\\n");
+    process.exit(1);
+  }
+}
 `
 );
 chmodSync(join(bin, "gh"), 0o755);
 
-// ── mock 大模型:按 reply 返回;记录调用次数与最后一次请求 ──
+// ── mock 大模型:按 reply 返回(finish 缺省为 stop);记录调用次数与最后一次请求 ──
 let reply = { status: 200, content: '{"update":false,"reason":"x"}' };
 let llmCalls = 0;
 let lastRequest = null;
@@ -73,7 +95,7 @@ const server = http.createServer((req, res) => {
       return res.end('{"error":"bad request"}');
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ choices: [{ message: { content: reply.content } }] }));
+    res.end(JSON.stringify({ choices: [{ message: { content: reply.content }, finish_reason: reply.finish || "stop" }] }));
   });
 });
 before(() => new Promise((r) => server.listen(0, "127.0.0.1", r)));
@@ -127,7 +149,10 @@ test("plan:配置的代码路径没有改动 → 明确日志 + Step Summary,不
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /PR #7 在配置的代码路径\(src\)下没有改动/);
   assert.match(r.summary, /没有改动/);
-  assert.equal(r.gh, "");
+  // 只读了 GitHub 上的 PR 数据(假 gh 404 → 退回 MERGE_SHA^1 并写明),没有任何写操作
+  assert.match(r.gh, /^gh api repos\/o\/r\/pulls\/7$/m);
+  assert.match(r.stdout, /读取 GitHub 上 PR #7 失败.*退回/);
+  assert.doesNotMatch(r.gh, /comments|issue (create|list)/);
   assert.equal(r.llm, 0);
 });
 
@@ -159,6 +184,14 @@ test("plan:模型输出 schema 校验失败 → 回帖「模型输出校验失�
   assert.doesNotMatch(r.gh, /issue create/);
 });
 
+test("plan:模型输出被截断(finish_reason=length)→ 不把半截 JSON 当结果,回帖「模型输出被截断」,失败退出", async () => {
+  reply = { status: 200, content: '{"update":true,"items":[{"file":"docs/zh/cache.md","cha', finish: "length" };
+  const r = await runPlan(CODE_SHA);
+  assert.equal(r.code, 1);
+  assert.match(r.gh, /原因类别:\*\*模型输出被截断\*\*/);
+  assert.doesNotMatch(r.gh, /issue create/);
+});
+
 test("plan:超预算 → 不调模型,回帖「超预算」,失败退出", async () => {
   const r = await runPlan(CODE_SHA, { PLAN_TOKEN_BUDGET: "50" });
   assert.equal(r.code, 1);
@@ -181,4 +214,43 @@ test("plan:正常路径 → prompt 含 diff + 索引 + 文档全文(不含图片
   // 假 gh 记下的是 shell 拆分后的参数,引号已去掉
   assert.match(r.gh, /gh issue create --title 📝 docs: 记录 size\(\) 方法 \(#7\) --label docs\/plan/);
   assert.match(r.gh, new RegExp(`"sourcePr":7,"mergeSha":"${CODE_SHA}"`));
+});
+
+test("plan:rebase 合并(PR 两个提交)→ diff 含全部提交;新建文档标「(新建)」且契约带 create;越界路径 → 校验失败", async () => {
+  const api = {
+    "repos/o/r/pulls/7": { number: 7, commits: 2, merge_commit_sha: REBASE_SHA },
+    "repos/o/r/pulls/7/commits?per_page=100": [[meta(HAS_SHA), meta(REBASE_SHA)]],
+    "repos/o/r/pulls/7/files?per_page=100": [[{ filename: "src/cache.js" }, { filename: "src/store.js" }]],
+  };
+  reply = {
+    status: 200,
+    content: JSON.stringify({
+      update: true,
+      reason: "新增 has() 与 Store",
+      title: "记录 has() 与 Store",
+      items: [
+        { file: "docs/zh/cache.md", change: "补充 has()" },
+        { file: "docs/zh/store.md", change: "新建 Store 文档", create: true },
+      ],
+      skipped: [],
+    }),
+  };
+  const r = await runPlan(REBASE_SHA, { FAKE_GH_API: JSON.stringify(api) });
+  assert.equal(r.code, 0, r.stderr);
+  const user = lastRequest.messages[1].content;
+  assert.match(user, /has\(key\) \{/); // PR 的第一个提交(旧口径 MERGE_SHA^1 会漏掉)
+  assert.match(user, /class Store/); // PR 的第二个提交
+  assert.match(r.stdout, /按 rebase 合并:.*与 GitHub PR 文件列表一致/);
+  assert.match(r.gh, /- \[ \] `docs\/zh\/store\.md`\(新建\) — 新建 Store 文档/);
+  assert.match(r.gh, /"file":"docs\/zh\/store\.md","change":"新建 Store 文档","create":true/);
+  assert.match(r.gh, /diff 口径 rebase 合并/);
+
+  reply = {
+    status: 200,
+    content: JSON.stringify({ update: true, reason: "x", title: "x", items: [{ file: "../outside.md", change: "x" }], skipped: [] }),
+  };
+  const bad = await runPlan(REBASE_SHA, { FAKE_GH_API: JSON.stringify(api) });
+  assert.equal(bad.code, 1);
+  assert.match(bad.gh, /原因类别:\*\*模型输出校验失败\*\*/);
+  assert.doesNotMatch(bad.gh, /issue create/);
 });

@@ -1,5 +1,9 @@
 // docs-draft workflow 的脚本:按已批准的计划写初稿,提文档 PR。
-import { readFileSync, writeFileSync } from "node:fs";
+// 计划里可以有新建文档(契约 items[].create,或文件当前不存在):路径限定在源文档目录内、禁止穿越;
+// 新建的文档与新生成的译文都显式 add 进提交。取 diff 与 plan 同一套口径(resolveDiffRange)。
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runStage } from "./llm.mjs";
 import { readContract, stripContracts } from "./contract.mjs";
 import { applyEdits } from "./edits.mjs";
@@ -7,11 +11,14 @@ import { loadStyle } from "./style.mjs";
 import { runCheck } from "./checklib.mjs";
 import { syncTranslation, qaTranslation } from "./translate.mjs";
 import { sh, shRead } from "./sh.mjs";
-import { loadConfig, isSourceDoc } from "./config.mjs";
-import { codeChangedFiles, diffFilesFor } from "./diff.mjs";
+import { loadConfig, isSourceDoc, checkNewDocPath } from "./config.mjs";
+import { resolveDiffRange, describeRange, codeChangedFiles, diffFilesFor } from "./diff.mjs";
 import { buildDiffText } from "./budget.mjs";
+import { classifyError } from "./errors.mjs";
+import { commitPaths, pushWithRebase } from "./git.mjs";
 
-const { ISSUE_NUMBER, ISSUE_BODY } = process.env;
+const { GITHUB_REPOSITORY, ISSUE_NUMBER, ISSUE_BODY } = process.env;
+const tmp = (name) => join(tmpdir(), name);
 
 // 从计划 Issue 解出源 PR 号和待改文件:优先读机读契约(方案 A ①),
 // 读不到(嵌契约之前建的存量 Issue)则回退到正则抠正文。
@@ -35,30 +42,41 @@ try {
   sh(`git config user.email docs-bot@users.noreply.github.com`);
   sh(`git switch -c ${branch}`);
 
+  const cfg = loadConfig();
   const system =
     readFileSync(new URL("../prompts/draft.md", import.meta.url), "utf8") +
     "\n\n# 技术写作规范\n" +
     loadStyle();
-  const current = planFiles.map((f) => `=== ${f} ===\n${readFileSync(f, "utf8")}`).join("\n\n");
+  // 计划里列出、当前还不存在的文件 = 要新建的文档:路径先过校验(源文档目录内、不许穿越),再提示模型用 create 编辑给全文
+  const newFiles = planFiles.filter((f) => !existsSync(f));
+  newFiles.forEach((f) => checkNewDocPath(f, cfg));
+  const current = planFiles
+    .map(
+      (f) =>
+        `=== ${f} ===\n${newFiles.includes(f) ? "(新建文件:当前不存在。用 create 编辑给出完整内容)" : readFileSync(f, "utf8")}`
+    )
+    .join("\n\n");
 
   // 已合并的代码 diff:配置项名、默认值、行为边界只在代码里,不给就只能靠猜。
-  // 合并提交优先取契约;存量 Issue 抠正文 "@ <sha>";再不行问 GitHub。受 diff 预算约束,超出按文件截断并标注。
-  const cfg = loadConfig();
+  // 合并提交优先取契约;存量 Issue 抠正文 "@ <sha>";再不行问 GitHub。区间按合并方式定(rebase 合并取全部提交)。
+  // 受 diff 预算约束,超出按文件截断并标注。
   const mergeSha =
     contract?.mergeSha ||
     (ISSUE_BODY.match(/@ ([0-9a-f]{7,40})\b/) || [])[1] ||
     shRead(`gh pr view ${prNum} --json mergeCommit --jq .mergeCommit.oid`).trim();
-  const codeDiff = buildDiffText(diffFilesFor(mergeSha, codeChangedFiles(mergeSha, cfg)), cfg.diffTokenBudget);
+  const range = resolveDiffRange({ sha: mergeSha, prNumber: prNum, repo: GITHUB_REPOSITORY });
+  const codeDiff = buildDiffText(diffFilesFor(range, codeChangedFiles(range, cfg)), cfg.diffTokenBudget);
 
   // 喂模型前剥掉契约块(内部数据,不是给模型读的正文)
   const { edits } = await runStage({
     stage: "draft",
     system,
-    user: `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n已合并的代码 diff(源 PR #${prNum} @ ${mergeSha.slice(0, 12)}):\n${codeDiff.text || "(配置的代码路径下没有改动)"}\n\n当前文档:\n${current}`,
+    user: `批准的计划(Issue #${ISSUE_NUMBER}):\n${stripContracts(ISSUE_BODY)}\n\n已合并的代码 diff(源 PR #${prNum},${describeRange(range)}):\n${codeDiff.text || "(配置的代码路径下没有改动)"}\n\n当前文档:\n${current}`,
   });
-  const editedPaths = applyEdits(edits);
+  // 新建文件只放行源文档目录内的合规路径
+  const editedPaths = applyEdits(edits, { assertCreatable: (p) => checkNewDocPath(p, cfg) });
 
-  // 增量同步译文镜像:只把本次源语言文档的改动反映到译文目录(多文件并行)
+  // 增量同步译文镜像:只把本次源语言文档的改动反映到译文目录(多文件并行;新建的源文档整篇翻译)
   const enPairs = await Promise.all(
     editedPaths.filter((p) => isSourceDoc(p, cfg)).map((src) => syncTranslation(src, edits))
   );
@@ -75,7 +93,7 @@ try {
     "- "
   );
   const changed = contract
-    ? contract.items.map((i) => `- \`${i.file}\` — ${i.change}`).join("\n")
+    ? contract.items.map((i) => `- \`${i.file}\`${i.create ? "(新建)" : ""} — ${i.change}`).join("\n")
     : planItems || editedPaths.map((p) => "- `" + p + "`").join("\n");
 
   const body = `## 背景
@@ -94,11 +112,13 @@ Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
   const issueTitle = shRead(`gh issue view ${ISSUE_NUMBER} --json title --jq .title`).trim();
   const docTitle = issueTitle.replace(/^📝\s*/, "").replace(/["`$\\]/g, "");
 
-  writeFileSync("/tmp/pr.md", body);
-  sh(`git commit -aqm "${docTitle}"`);
-  shRead(`git push -u origin ${branch}`);
+  writeFileSync(tmp("pr.md"), body);
+  // 显式 add:本次编辑过的文档(含新建)+ 同步出的译文(含新生成的)。不用 commit -a,否则新文件进不了提交
+  commitPaths([...editedPaths, ...enPairs.map((p) => p.target)], docTitle);
+  // 远端已有同名分支(上次推送成功、建 PR 失败)时被拒 → 变基后重试
+  pushWithRebase(branch);
   const out = sh(
-    `gh pr create --base ${base} --head ${branch} --title "${docTitle}" --label docs/draft --body-file /tmp/pr.md`
+    `gh pr create --base ${base} --head ${branch} --title "${docTitle}" --label docs/draft --body-file "${tmp("pr.md")}"`
   ).trim();
 
   // 文档审核(拼写/坏链):提示性贴评论,不阻断
@@ -109,18 +129,19 @@ Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
   if (docPr && enPairs.length) {
     const report = await qaTranslation(enPairs).catch(() => null);
     if (report) {
-      writeFileSync("/tmp/qa.md", `🌐 **译文质检**(提示性)\n\n${report}`);
-      sh(`gh pr comment ${docPr} --body-file /tmp/qa.md`);
+      writeFileSync(tmp("qa.md"), `🌐 **译文质检**(提示性)\n\n${report}`);
+      sh(`gh pr comment ${docPr} --body-file "${tmp("qa.md")}"`);
     }
   }
 } catch (e) {
-  // 失败时在计划 Issue 上留言,让人看得见(而不是只在 Actions 里红一下)
+  // 失败时在计划 Issue 上留言(带原因类别),让人看得见(而不是只在 Actions 里红一下)
+  const kind = classifyError(e);
   writeFileSync(
-    "/tmp/err.md",
-    `⚠️ 自动写初稿失败,请看 Actions 日志,或重新评论 \`/approve\` 重试。\n\n\`\`\`\n${String(e.message || e).slice(0, 500)}\n\`\`\``
+    tmp("draft-err.md"),
+    `⚠️ 自动写初稿失败(原因类别:**${kind.label}**),请看 Actions 日志,或重新评论 \`/approve\` 重试。\n\n\`\`\`\n${String(e.message || e).slice(0, 500)}\n\`\`\``
   );
   try {
-    sh(`gh issue comment ${ISSUE_NUMBER} --body-file /tmp/err.md`);
+    sh(`gh issue comment ${ISSUE_NUMBER} --body-file "${tmp("draft-err.md")}"`);
   } catch {}
   console.error(e);
   process.exit(1);

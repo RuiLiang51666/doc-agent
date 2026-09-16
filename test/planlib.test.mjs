@@ -1,14 +1,16 @@
-// plan 护栏的离线单测:异常分类 / 计划 Issue 查重 / Step Summary。纯函数、零网络。
+// plan 护栏的离线单测:异常分类 / 计划 Issue 查重 / 计划条目路径校验 / Step Summary。纯函数、零网络。
 // 跑:node --test
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyError, findPlanIssue, stepSummary } from "../scripts/planlib.mjs";
+import { classifyError, findPlanIssue, stepSummary, normalizePlanItems } from "../scripts/planlib.mjs";
 import { BudgetError } from "../scripts/budget.mjs";
+import { TruncatedError, PushError } from "../scripts/errors.mjs";
 import { embedContract } from "../scripts/contract.mjs";
 import { parseStage } from "../scripts/llm.mjs";
+import { loadConfig } from "../scripts/config.mjs";
 
 test("classifyError:超预算 / 模型接口报错 / 模型输出校验失败 / 其他异常", () => {
   assert.equal(classifyError(new BudgetError("x")).label, "超预算");
@@ -26,6 +28,11 @@ test("classifyError:超预算 / 模型接口报错 / 模型输出校验失败 / 
   assert.equal(classifyError(new Error("Command failed: git diff abc^1 abc")).label, "其他异常");
 });
 
+test("classifyError:模型输出被截断、推送失败各自成类", () => {
+  assert.equal(classifyError(new TruncatedError("模型输出被截断(finish_reason=length)")).label, "模型输出被截断");
+  assert.equal(classifyError(new PushError("推送 docs/plan-3 失败")).label, "推送失败");
+});
+
 test("findPlanIssue:按契约 sourcePr 定位,存量 Issue 退回认标题 (#N)", () => {
   const withContract = { number: 11, title: "📝 docs: 记录 size() (#42)", body: "正文" + embedContract("plan", { sourcePr: 42, items: [] }) };
   const legacy = { number: 5, title: "📝 docs: 记录 has() (#7)", body: "源代码变更:#7 @ abc" };
@@ -38,6 +45,33 @@ test("findPlanIssue:按契约 sourcePr 定位,存量 Issue 退回认标题 (#N)"
   const mismatch = { number: 13, title: "📝 docs: x (#9)", body: embedContract("plan", { sourcePr: 10, items: [] }) };
   assert.equal(findPlanIssue([mismatch], 9), null);
   assert.equal(findPlanIssue([{ number: 14, title: "📝 docs: y (#70)", body: "" }], 7), null); // (#70) 不是 (#7)
+});
+
+test("normalizePlanItems:已有文件照常;不存在的视为新建(须在源文档目录内);越界路径抛「模型输出不符合约定」", () => {
+  const root = mkdtempSync(join(tmpdir(), "doc-agent-items-"));
+  mkdirSync(join(root, "docs/zh"), { recursive: true });
+  writeFileSync(join(root, "docs/zh/a.md"), "# A\n");
+  const cfg = loadConfig({});
+  assert.deepEqual(
+    normalizePlanItems(
+      [
+        { file: "docs/zh/a.md", change: "改 A", create: true }, // 文件已存在:不当新建
+        { file: "docs/zh/guide/b.md", change: "新建 B" }, // 模型漏写 create:按不存在推断
+      ],
+      cfg,
+      { root }
+    ),
+    [
+      { file: "docs/zh/a.md", change: "改 A" },
+      { file: "docs/zh/guide/b.md", change: "新建 B", create: true },
+    ]
+  );
+  for (const file of ["../x.md", "/etc/x.md", "docs/en/new.md", "docs/zh/../../x.md"])
+    assert.throws(
+      () => normalizePlanItems([{ file, change: "x" }], cfg, { root }),
+      (e) => classifyError(e).label === "模型输出校验失败",
+      file
+    );
 });
 
 test("stepSummary:有 GITHUB_STEP_SUMMARY 就追加写入,没有(server 形态)返回 false", () => {

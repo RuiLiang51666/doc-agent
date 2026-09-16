@@ -1,5 +1,7 @@
 import { execSync, execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.mjs";
 
@@ -53,7 +55,9 @@ export async function runCheck(prNumber) {
   const body = problems.length
     ? `📋 **文档审核发现问题**(提示性,不阻断合并):\n\n${problems.join("\n\n")}`
     : `📋 文档审核通过 ✅ 拼写、链接均无问题。`;
-  writeFileSync("/tmp/check.md", body);
-  sh(`gh pr comment ${prNumber} --body-file /tmp/check.md`);
+  // 临时文件走 TMPDIR:server 形态每个任务一个独立目录,并发任务互不覆盖正文
+  const out = join(tmpdir(), "check.md");
+  writeFileSync(out, body);
+  sh(`gh pr comment ${prNumber} --body-file "${out}"`);
   return problems.length === 0;
 }

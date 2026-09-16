@@ -26,13 +26,21 @@ inputs:
     description: "翻译/译文质检用的更快模型(核心文档生成仍用 llm-model 保质量)"
     required: false
     default: "glm-4-flash"
+  llm-retry-max-wait-ms:
+    description: "单次模型调用遇到限流(429、智谱 1302/1303/1305)或 5xx 时,指数退避 + 随机抖动的累计等待上限(毫秒);再等就超限时如实失败回帖"
+    required: false
+    default: "180000"
+  llm-max-tokens:
+    description: "模型单次输出上限(max_tokens);留空 = 接口默认。输出被截断(finish_reason=length)时按「模型输出被截断」失败回帖,可调大此值"
+    required: false
+    default: ""
   # ── 路径与语言(默认 == 历史行为:代码 src、中文 docs/zh、英文 docs/en、*.md)──
   code-paths:
     description: "代码路径 glob,换行或逗号分隔;** 跨目录,! 或 :! 开头为排除(如 apollo-*/src/main/java 与 :!**/src/test/**)。只有这些文件的改动才触发文档评估"
     required: false
     default: "src"
   docs-source-dir:
-    description: "源语言(canonical)文档目录;仓库根目录写 ."
+    description: "源语言(canonical)文档目录;仓库根目录写 .。计划里的新建文档也只能落在这里"
     required: false
     default: "docs/zh"
   docs-target-dir:
@@ -79,6 +87,8 @@ runs:
         LLM_BASE_URL: ${{ inputs.llm-base-url }}
         LLM_MODEL: ${{ inputs.llm-model }}
         LLM_FAST_MODEL: ${{ inputs.llm-fast-model }}
+        LLM_RETRY_MAX_WAIT_MS: ${{ inputs.llm-retry-max-wait-ms }}
+        LLM_MAX_TOKENS: ${{ inputs.llm-max-tokens }}
         CODE_PATHS: ${{ inputs.code-paths }}
         DOCS_SOURCE_DIR: ${{ inputs.docs-source-dir }}
         DOCS_TARGET_DIR: ${{ inputs.docs-target-dir }}
@@ -93,6 +103,8 @@ runs:
         MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         ISSUE_NUMBER: ${{ github.event.issue.number }}
         ISSUE_BODY: ${{ github.event.issue.body }}
+        # pull_request_review 事件才有;有它 revise 就批量处理本 PR 全部待处理意见,没有(老的逐条评论事件)按单条处理
+        REVIEW_ID: ${{ github.event.review.id }}
         COMMENT_ID: ${{ github.event.comment.id }}
         COMMENT_BODY: ${{ github.event.comment.body }}
         COMMENT_PATH: ${{ github.event.comment.path }}

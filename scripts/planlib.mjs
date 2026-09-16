@@ -1,23 +1,13 @@
-// plan 阶段的护栏与输入组装:异常分类、计划 Issue 查重、Step Summary、读文档 + 组装 prompt。
-import { readFileSync, appendFileSync } from "node:fs";
+// plan 阶段的护栏与输入组装:异常分类、计划 Issue 查重、计划条目路径校验、Step Summary、读文档 + 组装 prompt。
+import { readFileSync, appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { readContract } from "./contract.mjs";
-import { isSourceDoc } from "./config.mjs";
+import { isSourceDoc, assertRepoPath, checkNewDocPath } from "./config.mjs";
 import { trackedFiles, diffFilesFor } from "./diff.mjs";
 import { buildPlanPrompt } from "./prefilter.mjs";
 
-/** 异常 → 原因类别(回帖给人看):超预算 / 模型接口报错 / 模型输出校验失败 / 其他异常。 */
-export function classifyError(e) {
-  const msg = String((e && e.message) || e);
-  if (e && e.code === "DOC_AGENT_BUDGET") return { key: "budget", label: "超预算" };
-  if (/模型输出不符合约定|无法从模型输出解析 JSON/.test(msg)) return { key: "schema", label: "模型输出校验失败" };
-  if (
-    /^LLM \d{3}\b/.test(msg) ||
-    (e && e.name === "AbortError") ||
-    /operation was aborted|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(msg)
-  )
-    return { key: "api", label: "模型接口报错" };
-  return { key: "other", label: "其他异常" };
-}
+// 异常分类挪到 errors.mjs(draft / revise / translate 也要用);这里转出,原有引用路径照常可用
+export { classifyError } from "./errors.mjs";
 
 /**
  * 在计划 Issue 列表里找同一源 PR 的那个:有契约就只认契约里的 sourcePr;
@@ -34,6 +24,24 @@ export function findPlanIssue(issues, prNumber) {
   );
 }
 
+/**
+ * 规整模型给的计划条目:路径必须是仓库内相对路径(不许绝对路径、..、反斜杠);
+ * 当前不存在的文件视为新建文档,还必须落在源文档目录内(见 config.mjs 的 checkNewDocPath),并打上 create: true。
+ * 不合规抛「模型输出不符合约定」,plan 据此归类为「模型输出校验失败」回帖。
+ */
+export function normalizePlanItems(items, cfg, { root = process.cwd() } = {}) {
+  return items.map((it, i) => {
+    try {
+      assertRepoPath(it.file);
+      if (existsSync(join(root, it.file))) return { file: it.file, change: it.change };
+      checkNewDocPath(it.file, cfg, root);
+      return { file: it.file, change: it.change, create: true };
+    } catch (e) {
+      throw new Error(`模型输出不符合约定:items[${i}] ${e.message}`);
+    }
+  });
+}
+
 /** 写入 $GITHUB_STEP_SUMMARY;server 形态没有这个文件,只打日志(返回 false)。 */
 export function stepSummary(md, env = process.env) {
   if (!env.GITHUB_STEP_SUMMARY) return false;
@@ -47,10 +55,10 @@ export const readSourceDocs = (cfg) =>
     .filter((p) => isSourceDoc(p, cfg))
     .map((path) => ({ path, text: readFileSync(path, "utf8") }));
 
-/** 组装 plan 输入(不调模型):读 assess 提示词、逐文件取 diff、读文档、预筛 + 预算。 */
-export function planInput({ cfg, sha, prNumber, prTitle, codeFiles }) {
+/** 组装 plan 输入(不调模型):读 assess 提示词、按区间逐文件取 diff、读文档、预筛 + 预算。range 见 diff.mjs。 */
+export function planInput({ cfg, range, prNumber, prTitle, codeFiles }) {
   const system = readFileSync(new URL("../prompts/assess.md", import.meta.url), "utf8");
-  const diffFiles = diffFilesFor(sha, codeFiles);
+  const diffFiles = diffFilesFor(range, codeFiles);
   const docs = readSourceDocs(cfg);
   return { system, ...buildPlanPrompt({ prNumber, prTitle, system, diffFiles, docs, codeFiles, cfg }) };
 }

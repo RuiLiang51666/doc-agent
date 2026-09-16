@@ -171,7 +171,7 @@ export function buildPlanPrompt({ prNumber, prTitle, system, diffFiles, docs, co
 
   const cut = diff.truncated.length ? `,其中 ${diff.truncated.length} 个已截断` : "";
   const head = `PR #${prNumber} (${prTitle}) diff(配置的代码路径下改动 ${diffFiles.length} 个文件${cut}):\n${diff.text}`;
-  const indexHead = `文档索引(${cfg.sourceName}源文档共 ${docs.length} 篇,路径 — 标题;★ = 下方附了全文,其余因预算只列索引):`;
+  const indexHead = `文档索引(${cfg.sourceName}源文档共 ${docs.length} 篇,路径 — 标题;★ = 下方附了全文,其余只列索引(预算不够,或与 diff 毫无交集)):`;
   const indexLine = (d, star) => `- ${star ? "★ " : ""}${d.path} — ${d.title}`;
   const fullHead = (k) => `现有文档(按与 diff 的相关度预筛,附全文 ${k} 篇):`;
   const byPath = [...ranked].sort((a, b) => (a.path < b.path ? -1 : 1));
@@ -190,6 +190,9 @@ export function buildPlanPrompt({ prNumber, prTitle, system, diffFiles, docs, co
   let remaining = budget - fixed;
   const selected = [];
   for (const d of ranked) {
+    // 得分为 0 = 与 diff 毫无交集:不放全文、只进索引。除此之外不设相对阈值——低分但相关的文档
+    // (如 Apollo #5649 的 quick-start.md 只排第 7)照样按预算放入
+    if (d.score <= 0) continue;
     const block = `=== ${d.path} ===\n${d.text}`;
     const tokens = estimateTokens(block) + 2;
     if (tokens > remaining) continue;
@@ -213,6 +216,7 @@ export function buildPlanPrompt({ prNumber, prTitle, system, diffFiles, docs, co
       systemTokens: estimateTokens(system),
       diff: { files: diffFiles.length, tokens: diff.tokens, budget: diffBudget, truncated: diff.truncated },
       docsTotal: docs.length,
+      zeroScore: ranked.filter((d) => d.score <= 0).length,
       selected: selected.map((d) => ({ path: d.path, score: d.score, tokens: d.tokens, hits: d.hits })),
       ranked: ranked.map((d) => ({ path: d.path, score: d.score, full: chosen.has(d.path) })),
     },

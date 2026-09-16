@@ -12,11 +12,14 @@
    - 新增一段内容时,`old_string` 取插入点附近的一段已有原文(例如其后的标题),
      `new_string` =「新内容 + 那段原文」。
    - 绝不改动 `old_string` 之外的任何字符,包括 frontmatter、空行、行尾。
+5. **新建文件**:计划里标「新建」、当前文档处显示「(新建文件:当前不存在…)」的,用
+   `{ "path": str, "create": true, "content": str }` 一次给出完整内容(标题层级、frontmatter 沿用相邻文档)。
+   只为这类文件用 create;不要对它再给 search/replace,也绝不用 create 覆盖已有文件。
 
 # 输出前自检
 - 每个 `old_string` 是否在目标文件中**逐字节存在且唯一**?不唯一就补更多上下文。
 - 是否只改了计划点名处?有没有顺手动了无关文字?有就删掉那条编辑。
-- 每条的 `path` 是否是计划里的文件?
+- 每条的 `path` 是否是计划里的文件?create 是否只用在计划标「新建」的文件上?
 
 # 示例(给 `Cache` 补 size() 方法的文档,在 delete 段后插入)
 当前 docs/zh/cache.md 该处为:
@@ -28,5 +31,5 @@
   "old_string": "### `delete(key)`\n\n删除指定键。",
   "new_string": "### `delete(key)`\n\n删除指定键。\n\n### `size(): number`\n\n返回当前缓存中的条目数量。" } ] }
 
-只输出一个 JSON 对象:
-{ "edits": [ { "path": str, "old_string": str, "new_string": str } ] }
+只输出一个 JSON 对象(每条编辑二选一):
+{ "edits": [ { "path": str, "old_string": str, "new_string": str } 或 { "path": str, "create": true, "content": str } ] }

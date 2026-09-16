@@ -15,8 +15,12 @@ GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App*
 - **Repository permissions**:
   - Contents → **Read and write**(推文档分支)
   - Issues → **Read and write**(开/评计划 Issue)
-  - Pull requests → **Read and write**(开文档 PR、评论、resolve 线程)
-- **Subscribe to events**:Pull request、Issue comment、Pull request review comment
+  - Pull requests → **Read and write**(开文档 PR、评论、resolve 线程、读 PR 的提交与文件列表)
+- **Subscribe to events**:Pull request、Issue comment、**Pull request review**、Pull request review comment
+
+「Pull request review」是推荐的返工触发源:审阅者提交整个 review 时来一次,后端一次处理该 PR 上全部待处理意见。
+只订阅了「Pull request review comment」也能用——后端同样按「本 PR 全部待处理意见」批量处理,同一 PR 的事件排队串行,
+一次 review 带来的多个事件不会各改各的。
 
 建好后:记下 **App ID**;**Generate a private key** 下载 `.pem`;把 App **Install** 到目标仓库。
 
@@ -40,11 +44,21 @@ npm start
 export CODE_PATHS=$'apollo-*/src/**\nscripts/**\n:!**/src/test/**'   # 默认 src
 export DOCS_SOURCE_DIR=docs/zh DOCS_TARGET_DIR=docs/en               # 默认即此;KWDB 式写 . 与 en
 export PLAN_TOKEN_BUDGET=60000 DIFF_TOKEN_BUDGET=20000               # 默认即此
+export LLM_RETRY_MAX_WAIT_MS=180000                                  # 限流退避的累计等待上限,默认即此
 ```
 
 注意:一个后端进程的配置对它服务的所有安装仓库生效;布局不同的仓库需要分进程部署。
 
-## 3. 本地开发(没有公网地址时)
+## 3. 并发模型
+
+- **按 PR / Issue 串行**:`queue.mjs` 是进程内的分组队列——同一个 PR(plan / revise)或同一个计划 Issue(draft)的事件
+  依次执行,不同 PR 之间照常并行。克隆目录与临时目录(`TMPDIR`)每个任务一份,并发任务不会互相覆盖 Issue / PR / 评论正文。
+- **排队中的同类事件会合并**:同一 PR 已有一个还没开始的 revise 任务时,新事件并入它——反正 revise 每次都处理「全部待处理意见」。
+  已经开始运行的任务不受影响,运行期间新提交的 review 会另排一个,不会漏。
+- **token 在任务真正开始时才取**:installation token 一小时过期,排队久了也不会用到过期的 token。
+- 子进程异步执行,收 webhook 不被长任务阻塞(GitHub webhook ~10s 超时)。
+
+## 4. 本地开发(没有公网地址时)
 
 用 [smee.io](https://smee.io) 把公网 webhook 转发到本地:
 
