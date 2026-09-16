@@ -1,0 +1,109 @@
+# Apollo 回放演示专用 workflow —— 放进 fork 的 .github/workflows/doc-agent.yml
+#
+# 适用对象:apolloconfig/apollo 的个人 fork(如 RuiLiang51666/apollo),用于回放上游已合并 PR,
+# 让 doc-agent 真跑一轮,再与上游 PR 里人工写的文档改动对比。操作顺序见 examples/apollo-demo-runbook.md。
+#
+# 使用前必须改的一处:把下面三处 `RuiLiang51666/doc-agent@v1.2` 换成你自己的
+#   <你的用户名>/<doc-agent 仓库名>@<tag>
+# tag 要指向含 P0 + P1 能力的提交(路径配置化、draft 带 diff、文档预筛、并发互斥、限流退避、
+# 按合并方式取 diff)。仓库里现有的 v1 / v1.1 都在这之前,直接用会跑不起来(代码路径写死 src/)。
+#   git push origin main && git tag v1.2 && git push origin v1.2
+# 也可以先用 @main 验证,稳定后再打 tag;生产接入建议钉 tag 而不是分支。
+#
+# 三个前提(否则第一轮必失败,详见 runbook):
+#   1. fork 的 Issues 功能要打开(fork 默认关闭);plan 阶段要开计划 Issue。
+#   2. Settings → Actions → General → Workflow permissions 勾上
+#      "Allow GitHub Actions to create and approve pull requests";draft 阶段用 github.token 开文档 PR。
+#   3. 回放基线分支(replay-base)要设为**默认分支**:draft 阶段按默认分支选文档 PR 的目标分支;
+#      同时它决定 issues / issue_comment / pull_request_target / schedule 事件读哪个分支的 workflow 文件,
+#      是屏蔽上游 CI 噪声的关键。
+#
+# 路径配置说明(Apollo 的真实布局):
+#   - 代码:apollo-* 各模块在 apollo-*/src/**,另有仓库根的 scripts/(构建脚本,#5580 改到过);
+#           排除 **/src/test/** ,单测改动不触发文档评估。
+#   - 中文文档 docs/zh、英文文档 docs/en,与 doc-agent 的默认值相同,写出来是为了让这份文件自解释。
+#   - token 预算用默认值(plan 60000 / diff 20000)。Apollo 的 37 篇中文文档全量约 12 万 token,
+#     靠 plan 阶段的预筛压进预算;四个候选 PR 的干跑实测都在 59.9K 以内。
+
+name: doc-agent
+
+on:
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  # ① 代码 PR 合并 → 评估文档影响 → 开「文档更新计划」Issue
+  plan:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    # 同一 PR / Issue 的运行串行,互不踩踏;cancel-in-progress: false 不打断正在跑的那次
+    concurrency:
+      group: doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    # pull-requests: read 是取 diff 用的:要读该 PR 的提交列表与文件列表,才能判定 merge / squash / rebase
+    # 三种合并方式各自对应哪段提交区间。缺这个权限不会中断,但会退回 MERGE_SHA^1,rebase 合并下漏改动。
+    permissions: { contents: read, issues: write, pull-requests: read }
+    steps:
+      - uses: RuiLiang51666/doc-agent@v1.2
+        with:
+          mode: plan
+          github-token: ${{ github.token }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+          code-paths: |
+            apollo-*/src/**
+            scripts/**
+            :!**/src/test/**
+          docs-source-dir: docs/zh
+          docs-target-dir: docs/en
+
+  # ② 在计划 Issue 下评论 /approve → 写文档初稿 + 中英同步 → 提文档 PR
+  draft:
+    if: >
+      github.event_name == 'issue_comment' &&
+      contains(github.event.issue.labels.*.name, 'docs/plan') &&
+      startsWith(github.event.comment.body, '/approve') &&
+      github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    permissions: { contents: write, issues: write, pull-requests: write }
+    steps:
+      - uses: RuiLiang51666/doc-agent@v1.2
+        with:
+          mode: draft
+          github-token: ${{ github.token }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+          # draft 阶段要重新取一次已合并代码的 diff(配置项名、默认值、行为边界只在代码里),
+          # 所以 code-paths 必须与 plan 一致
+          code-paths: |
+            apollo-*/src/**
+            scripts/**
+            :!**/src/test/**
+          docs-source-dir: docs/zh
+          docs-target-dir: docs/en
+
+  # ③ 在文档 PR 上提交 review(一次可以留多条行内意见)→ 一次运行处理全部待处理意见 → 一个提交
+  revise:
+    if: >
+      github.event_name == 'pull_request_review' &&
+      contains(github.event.pull_request.labels.*.name, 'docs/draft') &&
+      github.event.review.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    permissions: { contents: write, pull-requests: write }
+    steps:
+      - uses: RuiLiang51666/doc-agent@v1.2
+        with:
+          mode: revise
+          ref: ${{ github.event.pull_request.head.ref }}
+          github-token: ${{ github.token }}
+          llm-api-key: ${{ secrets.LLM_API_KEY }}
+          docs-source-dir: docs/zh
+          docs-target-dir: docs/en
