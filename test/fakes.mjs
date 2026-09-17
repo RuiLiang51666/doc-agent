@@ -7,7 +7,8 @@ import { execFile, execFileSync } from "node:child_process";
 
 /**
  * 在 dir 下写假 gh 与 npx。
- * gh:把参数拼成一行,按 FAKE_GH_RULES(JSON:[[正则, 输出, 退出码?], ...])逐条匹配,第一条命中的生效;
+ * gh:把参数拼成一行,按 FAKE_GH_RULES(JSON:[[正则, 输出, 退出码?], ...])逐条匹配,第一条命中的生效
+ * (退出码非 0 时输出写到 stderr,模拟 gh 报错,如 "gh: Resource not accessible by integration (HTTP 403)");
  * 都没命中时,api 读请求(不带 -f / -F)按 404 失败,其余调用成功、无输出。
  * 每次调用连同 --body-file / -F body=@file 的正文追加写进 FAKE_GH_LOG。
  */
@@ -27,7 +28,7 @@ args.forEach((a, i) => {
 fs.appendFileSync(process.env.FAKE_GH_LOG, entry + "\\n");
 for (const [re, out, code] of JSON.parse(process.env.FAKE_GH_RULES || "[]")) {
   if (new RegExp(re).test(line)) {
-    process.stdout.write(out);
+    (code ? process.stderr : process.stdout).write(out);
     process.exit(code || 0);
   }
 }

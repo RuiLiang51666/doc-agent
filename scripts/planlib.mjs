@@ -1,4 +1,5 @@
 // plan 阶段的护栏与输入组装:异常分类、计划 Issue 查重、计划条目路径校验、Step Summary、读文档 + 组装 prompt。
+// 其中「失败回帖被拒时的提示」(reportCommentFailure)draft / revise 也用。
 import { readFileSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { readContract } from "./contract.mjs";
@@ -47,6 +48,27 @@ export function stepSummary(md, env = process.env) {
   if (!env.GITHUB_STEP_SUMMARY) return false;
   appendFileSync(env.GITHUB_STEP_SUMMARY, `${md}\n\n`);
   return true;
+}
+
+// gh 报错里最有用的一行:取 stderr(没有就取 message)的最后一个非空行,去掉 "gh: " 前缀
+const ghReason = (err) => {
+  const lines = String((err && (err.stderr || err.message)) || err)
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return (lines.at(-1) || "未知错误").replace(/^gh:\s*/, "").slice(0, 200);
+};
+
+/**
+ * 失败回帖本身也失败了(常见 403:workflow 没给对应的写权限)时调用,不许再静默吞掉(plan / draft / revise 共用):
+ * 日志打出「无法在 <位置> 下回帖:<原因>,请检查 workflow 的 <权限> 权限」,连同本次失败的原因类别写进 Step Summary。
+ * 返回那行提示。调用方照样以失败退出。
+ */
+export function reportCommentFailure({ target, permission, kind, err, env = process.env }) {
+  const hint = `无法在 ${target} 下回帖:${ghReason(err)},请检查 workflow 的 ${permission} 权限`;
+  console.error(hint);
+  stepSummary(`> ⚠️ **失败说明没能回帖**(本次失败原因类别:**${kind.label}**)——${hint}`, env);
+  return hint;
 }
 
 /** 当前 checkout 里全部源语言文档:[{ path, text }]。 */

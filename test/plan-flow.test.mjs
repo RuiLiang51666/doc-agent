@@ -1,5 +1,5 @@
 // plan.mjs 端到端离线测试:临时 git 仓库 + 假 gh(记录每次调用)+ 本机 mock 大模型接口。
-// 覆盖:无代码改动不静默、已有计划 Issue 跳过、各类异常(含输出被截断)在 PR 下回帖并失败退出、正常开 Issue、
+// 覆盖:无代码改动不静默、已有计划 Issue 跳过、各类异常(含输出被截断)在 PR 下回帖并失败退出、回帖被拒(403)也不静默、正常开 Issue、
 // rebase 合并按 PR 全部提交取 diff、计划里的新建文档与越界路径。
 // 跑:node --test
 import { test, before, after } from "node:test";
@@ -53,7 +53,8 @@ const meta = (sha) => {
 };
 
 // ── 假 gh:把参数与 --body-file / -F body=@file 的正文记进日志;issue list 返回 FAKE_GH_ISSUES;
-//    api 读请求(不带 -f / -F)按 FAKE_GH_API({ 路径: 返回值 })回放,没有就按 404 失败 ──
+//    api 读请求(不带 -f / -F)按 FAKE_GH_API({ 路径: 返回值 })回放,没有就按 404 失败;
+//    设了 FAKE_GH_COMMENT_403 时,发评论按真实环境的 403 拒绝(plan job 的 pull-requests 只有读权限时就是这样)──
 writeFileSync(
   join(bin, "gh"),
   `#!/usr/bin/env node
@@ -65,6 +66,10 @@ args.forEach((a, i) => {
   if (a === "-F" && args[i + 1].startsWith("body=@")) entry += "\\n" + fs.readFileSync(args[i + 1].slice(6), "utf8");
 });
 fs.appendFileSync(process.env.FAKE_GH_LOG, entry + "\\n");
+if (process.env.FAKE_GH_COMMENT_403 && args[0] === "api" && /\\/comments$/.test(args[1] || "") && args.includes("-F")) {
+  process.stderr.write("gh: Resource not accessible by integration (HTTP 403)\\n");
+  process.exit(1);
+}
 if (args[0] === "issue" && args[1] === "list") process.stdout.write(process.env.FAKE_GH_ISSUES || "[]");
 if (args[0] === "issue" && args[1] === "create") process.stdout.write("https://github.com/o/r/issues/99\\n");
 if (args[0] === "api" && !args.includes("-F") && !args.includes("-f")) {
@@ -174,6 +179,17 @@ test("plan:模型接口 4xx → 在被合并的 PR 下回帖「模型接口报�
   assert.match(r.gh, /原因类别:\*\*模型接口报错\*\*/);
   assert.doesNotMatch(r.gh, /issue create/);
   assert.match(r.summary, /模型接口报错/);
+});
+
+test("plan:失败回帖被拒(HTTP 403)→ 不静默:日志与 Step Summary 写明原因类别 +「无法在 PR #N 下回帖…pull-requests: write 权限」,仍失败退出", async () => {
+  reply = { status: 400 };
+  const r = await runPlan(CODE_SHA, { FAKE_GH_COMMENT_403: "1" });
+  assert.equal(r.code, 1);
+  assert.match(r.gh, /gh api repos\/o\/r\/issues\/7\/comments -F body=@/); // 确实试过回帖
+  const hint = "无法在 PR #7 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限";
+  assert.ok(r.stderr.includes(hint), r.stderr);
+  assert.ok(r.summary.includes(`(本次失败原因类别:**模型接口报错**)——${hint}`), r.summary);
+  assert.match(r.stderr, /LLM 400/); // 原始异常照样打出
 });
 
 test("plan:模型输出 schema 校验失败 → 回帖「模型输出校验失败」,失败退出", async () => {

@@ -1,6 +1,6 @@
 // revise.mjs 端到端离线测试:本地裸仓库当远端 + 假 gh(回放 review 评论与线程)+ 本机 mock 大模型。
 // 覆盖:一次 review 多条意见 → 一次调模型、一个提交、逐线程回复并解决;推送被另一次运行抢先 → 变基重试成功;
-// 同一处冲突 → 如实回帖「推送失败」;没有待处理意见 → 不调模型;老 workflow 的单条模式照常工作。
+// 同一处冲突 → 如实回帖「推送失败」;回帖被拒(403)也不静默;没有待处理意见 → 不调模型;老 workflow 的单条模式照常工作。
 // 跑:node --test
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -19,6 +19,7 @@ let llm;
 let beforeReviseReply = () => {}; // 用例在「模型返回之前」插入动作,模拟另一次运行抢先推送
 before(async () => {
   llm = await startMockLLM((body) => {
+    if (body.model === "bad-x") return { status: 400 }; // 模型接口报错(4xx 不重试)
     if (body.model === "revise-x") {
       beforeReviseReply();
       return {
@@ -198,6 +199,24 @@ test("revise 批量:另一次运行改了同一处 → 变基冲突,在每个待
   assert.doesNotMatch(r.gh, /Done in/);
   assert.equal(gitIn(ctx.remote, "log", "-1", "--format=%s", BRANCH), "docs: 另一次运行改了同一处");
   assert.ok(!existsSync(join(ctx.repo, ".git", "rebase-merge")) && !existsSync(join(ctx.repo, ".git", "rebase-apply")));
+});
+
+test("revise 批量:线程回帖与 PR 回帖都被拒(HTTP 403)→ 不静默:日志与 Step Summary 写明原因类别 + pull-requests: write 权限提示,仍失败退出", async () => {
+  const ctx = setup();
+  const summary = join(ctx.root, "summary.md");
+  const denied = "gh: Resource not accessible by integration (HTTP 403)\n";
+  const r = await runRevise(ctx, {
+    LLM_MODEL_REVISE: "bad-x",
+    GITHUB_STEP_SUMMARY: summary,
+    FAKE_GH_RULES: JSON.stringify([["/replies ", denied, 1], ["^pr comment 9", denied, 1], ...JSON.parse(rules())]),
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.gh, /comments\/101\/replies/);
+  assert.match(r.gh, /comments\/102\/replies/);
+  assert.match(r.gh, /pr comment 9 --body-file/); // 线程一条都没回上 → 退到 PR 下回帖
+  const hint = "无法在 PR #9 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限";
+  assert.ok(r.stderr.includes(hint), r.stderr);
+  assert.ok(readLog(summary).includes(`(本次失败原因类别:**模型接口报错**)——${hint}`));
 });
 
 test("revise 单条(老 workflow 的 pull_request_review_comment 触发):只处理触发的那条,沿用历史提交说明", async () => {

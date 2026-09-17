@@ -3,11 +3,12 @@
 # 适用对象:apolloconfig/apollo 的个人 fork(如 RuiLiang51666/apollo),用于回放上游已合并 PR,
 # 让 doc-agent 真跑一轮,再与上游 PR 里人工写的文档改动对比。操作顺序见 examples/apollo-demo-runbook.md。
 #
-# 使用前必须改的一处:把下面三处 `RuiLiang51666/doc-agent@v1.2` 换成你自己的
+# 使用前必须改的一处:把下面三处 `RuiLiang51666/doc-agent@v1.2.1` 换成你自己的
 #   <你的用户名>/<doc-agent 仓库名>@<tag>
 # tag 要指向含 P0 + P1 能力的提交(路径配置化、draft 带 diff、文档预筛、并发互斥、限流退避、
 # 按合并方式取 diff)。仓库里现有的 v1 / v1.1 都在这之前,直接用会跑不起来(代码路径写死 src/)。
-#   git push origin main && git tag v1.2 && git push origin v1.2
+# v1.2.1 = v1.2 + plan 失败回帖修复(plan job 权限改为 pull-requests: write,回帖被拒写进 Step Summary)。
+#   git push origin main && git tag v1.2.1 && git push origin v1.2.1
 # 也可以先用 @main 验证,稳定后再打 tag;生产接入建议钉 tag 而不是分支。
 #
 # 三个前提(否则第一轮必失败,详见 runbook):
@@ -44,11 +45,14 @@ jobs:
     concurrency:
       group: doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: false
-    # pull-requests: read 是取 diff 用的:要读该 PR 的提交列表与文件列表,才能判定 merge / squash / rebase
-    # 三种合并方式各自对应哪段提交区间。缺这个权限不会中断,但会退回 MERGE_SHA^1,rebase 合并下漏改动。
-    permissions: { contents: read, issues: write, pull-requests: read }
+    # pull-requests 必须是 write,两个用途:
+    #   - 取 diff:读该 PR 的提交列表与文件列表,判定 merge / squash / rebase 各对应哪段提交区间
+    #     (读不到不会中断,但会退回 MERGE_SHA^1,rebase 合并下漏改动);
+    #   - 失败回帖:在被合并的代码 PR 下说明原因。评论虽走 issues 接口,对 PR 编号 GitHub 按 Pull requests
+    #     权限判定,只有 read 会被拒(403,v1.2 在 Apollo 首轮回放实测),失败原因就只剩 Actions 日志里能看到。
+    permissions: { contents: read, issues: write, pull-requests: write }
     steps:
-      - uses: RuiLiang51666/doc-agent@v1.2
+      - uses: RuiLiang51666/doc-agent@v1.2.1
         with:
           mode: plan
           github-token: ${{ github.token }}
@@ -73,7 +77,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, issues: write, pull-requests: write }
     steps:
-      - uses: RuiLiang51666/doc-agent@v1.2
+      - uses: RuiLiang51666/doc-agent@v1.2.1
         with:
           mode: draft
           github-token: ${{ github.token }}
@@ -99,7 +103,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, pull-requests: write }
     steps:
-      - uses: RuiLiang51666/doc-agent@v1.2
+      - uses: RuiLiang51666/doc-agent@v1.2.1
         with:
           mode: revise
           ref: ${{ github.event.pull_request.head.ref }}

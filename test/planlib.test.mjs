@@ -1,11 +1,18 @@
-// plan 护栏的离线单测:异常分类 / 计划 Issue 查重 / 计划条目路径校验 / Step Summary。纯函数、零网络。
+// plan 护栏的离线单测:异常分类 / 计划 Issue 查重 / 计划条目路径校验 / Step Summary / 回帖被拒的提示。纯函数、零网络。
 // 跑:node --test
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyError, findPlanIssue, stepSummary, normalizePlanItems } from "../scripts/planlib.mjs";
+import { execSync } from "node:child_process";
+import {
+  classifyError,
+  findPlanIssue,
+  stepSummary,
+  normalizePlanItems,
+  reportCommentFailure,
+} from "../scripts/planlib.mjs";
 import { BudgetError } from "../scripts/budget.mjs";
 import { TruncatedError, PushError } from "../scripts/errors.mjs";
 import { embedContract } from "../scripts/contract.mjs";
@@ -80,4 +87,33 @@ test("stepSummary:有 GITHUB_STEP_SUMMARY 就追加写入,没有(server 形态)�
   assert.equal(stepSummary("第二行", { GITHUB_STEP_SUMMARY: file }), true);
   assert.equal(readFileSync(file, "utf8"), "第一行\n\n第二行\n\n");
   assert.equal(stepSummary("x", {}), false);
+});
+
+test("reportCommentFailure:回帖 403 → 日志打出位置 + gh 原因 + 权限提示,并连同原因类别写进 Step Summary", () => {
+  // 用 execSync 的真实报错对象(与 sh.mjs 同源),原因取 stderr 最后一行、去掉 "gh: "
+  let err;
+  try {
+    execSync(`node -e 'process.stderr.write("gh: Resource not accessible by integration (HTTP 403)\\n"); process.exit(1)'`, { stdio: "pipe" });
+  } catch (e) {
+    err = e;
+  }
+  const file = join(mkdtempSync(join(tmpdir(), "doc-agent-summary-")), "summary.md");
+  const logged = [];
+  const orig = console.error;
+  console.error = (m) => logged.push(m);
+  try {
+    const hint = reportCommentFailure({
+      target: "PR #1",
+      permission: "pull-requests: write",
+      kind: classifyError(new Error('LLM 429: {"error":{"code":"1113"}}')),
+      err,
+      env: { GITHUB_STEP_SUMMARY: file },
+    });
+    const expected = "无法在 PR #1 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限";
+    assert.equal(hint, expected);
+    assert.deepEqual(logged, [expected]);
+    assert.equal(readFileSync(file, "utf8"), `> ⚠️ **失败说明没能回帖**(本次失败原因类别:**模型接口报错**)——${expected}\n\n`);
+  } finally {
+    console.error = orig;
+  }
 });

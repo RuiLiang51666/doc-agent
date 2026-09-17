@@ -42,8 +42,9 @@
 ### A. GitHub Actions(目标仓库放一个瘦 workflow)
 
 把下面这个放到目标仓库 `.github/workflows/doc-agent.yml`(`OWNER` 换成 doc-agent 仓库所有者),
-配好 `LLM_API_KEY` secret、建两个 label 即可。逻辑全在 `doc-agent@v1`,升级只需 bump tag。
+配好 `LLM_API_KEY` secret、建两个 label 即可。逻辑全在 `doc-agent@v1.2.1`,升级只需 bump tag。
 `concurrency` 让同一 PR / Issue 的运行串行;老的 `pull_request_review_comment` 触发仍兼容,迁移说明见 README。
+三个 job 的 `permissions` 照抄即可:plan 也要 `pull-requests: write`,否则失败时在代码 PR 下回帖会被 GitHub 以 403 拒绝。
 
 ```yaml
 name: doc-agent
@@ -56,20 +57,20 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     concurrency: { group: "doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}", cancel-in-progress: false }
-    permissions: { contents: read, issues: write, pull-requests: read }
-    steps: [{ uses: OWNER/doc-agent@v1, with: { mode: plan, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
+    permissions: { contents: read, issues: write, pull-requests: write }
+    steps: [{ uses: OWNER/doc-agent@v1.2.1, with: { mode: plan, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
   draft:
     if: github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'docs/plan') && startsWith(github.event.comment.body, '/approve') && github.event.comment.user.type != 'Bot'
     runs-on: ubuntu-latest
     concurrency: { group: "doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}", cancel-in-progress: false }
     permissions: { contents: write, issues: write, pull-requests: write }
-    steps: [{ uses: OWNER/doc-agent@v1, with: { mode: draft, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
+    steps: [{ uses: OWNER/doc-agent@v1.2.1, with: { mode: draft, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
   revise:
     if: github.event_name == 'pull_request_review' && contains(github.event.pull_request.labels.*.name, 'docs/draft') && github.event.review.user.type != 'Bot'
     runs-on: ubuntu-latest
     concurrency: { group: "doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}", cancel-in-progress: false }
     permissions: { contents: write, pull-requests: write }
-    steps: [{ uses: OWNER/doc-agent@v1, with: { mode: revise, ref: "${{ github.event.pull_request.head.ref }}", github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
+    steps: [{ uses: OWNER/doc-agent@v1.2.1, with: { mode: revise, ref: "${{ github.event.pull_request.head.ref }}", github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
 ```
 
 ### B. GitHub App + 后端(目标仓库零文件)
@@ -96,7 +97,7 @@ jobs:
 
 ## 五、出问题时
 
-- **评估失败**:机器人会在被合并的代码 PR 下回帖原因类别(超预算 / 模型接口报错 / 模型输出被截断 / 模型输出校验失败 / 其他异常);排查后 Re-run 该 job 即可(同一 PR 已有计划 Issue 会自动跳过,不会重复开)。
+- **评估失败**:机器人会在被合并的代码 PR 下回帖原因类别(超预算 / 模型接口报错 / 模型输出被截断 / 模型输出校验失败 / 其他异常);排查后 Re-run 该 job 即可(同一 PR 已有计划 Issue 会自动跳过,不会重复开)。PR 下没看到回帖时,去 Actions 页看该 job 的 Step Summary:回帖被拒会写明原因类别与「无法在 PR #N 下回帖:…,请检查 workflow 的 pull-requests: write 权限」。
 - **生成失败**:机器人会在计划 Issue 下留言报错(带原因类别);修掉后重新 `/approve`(幂等,不会重复建 PR)即可重试。
 - **返工失败**:机器人在对应的 review 线程下回帖说明原因类别。该意见随即算作「已答复」,不会被后续运行反复重试——要重试,在那条线程下再回一条意见即可。
 - **模型限流(429 / 智谱 1302 等)**:自动指数退避 + 随机抖动重试,累计等待到 `llm-retry-max-wait-ms` 为止;仍不行就如实失败回帖。欠费、当日额度用尽这类不重试。

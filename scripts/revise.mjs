@@ -16,6 +16,7 @@ import { sh, shRead } from "./sh.mjs";
 import { ghList } from "./gh.mjs";
 import { loadConfig, isSourceDoc } from "./config.mjs";
 import { classifyError } from "./errors.mjs";
+import { reportCommentFailure } from "./planlib.mjs";
 import { commitPaths, currentBranch, pushWithRebase } from "./git.mjs";
 import { pendingThreads, reviseUser, REPLY_MARK } from "./review.mjs";
 
@@ -122,19 +123,26 @@ try {
   // 要重试就在线程里补一条回复。一条都回不上(或还没拿到意见列表)就在 PR 下回帖。
   const kind = classifyError(e);
   const reason = `(原因类别:**${kind.label}**):${String(e.message || e).slice(0, 400)}`;
+  // 回帖被拒(常见 403:revise job 没给 pull-requests: write)不许静默:日志 + Step Summary 写明原因类别与权限提示
+  const notice = (target, err) => reportCommentFailure({ target, permission: "pull-requests: write", kind, err });
   let posted = 0;
+  let replyErr = null;
   for (const t of threads) {
     try {
       reply(t.rootId, `⚠️ 按这条评论返工失败${reason}\n\n如需重试,在本线程下补一条回复即可。`);
       posted++;
-    } catch {}
+    } catch (err) {
+      replyErr = err;
+    }
   }
   if (!posted) {
     try {
       writeFileSync(tmp("revise-err.md"), `⚠️ 按 review 意见返工失败${reason}`);
       sh(`gh pr comment ${PR_NUMBER} --body-file "${tmp("revise-err.md")}"`);
-    } catch {}
-  }
+    } catch (err) {
+      notice(`PR #${PR_NUMBER}`, err);
+    }
+  } else if (replyErr) notice(`PR #${PR_NUMBER} 的部分 review 线程`, replyErr);
   console.error(e);
   process.exit(1);
 }

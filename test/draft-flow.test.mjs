@@ -1,6 +1,6 @@
 // draft.mjs 端到端离线测试:本地裸仓库当远端 + 假 gh + 本机 mock 大模型。
 // 覆盖:计划含新建文档 → 新建的中文文档与新生成的英文译文都进提交并推送;取 diff 按 rebase 合并口径含 PR 全部提交;
-// 模型要在源文档目录外新建 → 拒绝落盘,在计划 Issue 下回帖「模型输出校验失败」,不推送、不建 PR。
+// 模型要在源文档目录外新建 → 拒绝落盘,在计划 Issue 下回帖「模型输出校验失败」,不推送、不建 PR;回帖被拒(403)也不静默。
 // 跑:node --test
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -81,7 +81,7 @@ const rules = (ctx) =>
     ["^api --paginate --slurp repos/o/r/pulls/7/files\\?per_page=100$", JSON.stringify([[{ filename: "src/cache.js" }, { filename: "src/ttl.js" }]])],
   ]);
 
-function runDraft(ctx) {
+function runDraft(ctx, env = {}) {
   const log = join(ctx.root, "gh.log");
   const seen = llm.requests.length;
   return runNode(DRAFT, {
@@ -102,6 +102,7 @@ function runDraft(ctx) {
       LLM_MODEL_SYNC: "sync-x",
       LLM_MODEL_TRANSLATE: "translate-x",
       LLM_FAST_MODEL: "fast-x",
+      ...env,
     },
   }).then((r) => ({ ...r, gh: readLog(log), llm: llm.requests.slice(seen) }));
 }
@@ -140,4 +141,22 @@ test("draft:模型要在源文档目录外新建 → 拒绝落盘,计划 Issue �
   assert.doesNotMatch(r.gh, /pr create/);
   assert.ok(!existsSync(join(ctx.root, "escape.md")));
   assert.equal(gitIn(ctx.remote, "branch", "--list", "docs/plan-12"), "");
+});
+
+test("draft:失败回帖被拒(HTTP 403)→ 不静默:日志与 Step Summary 写明原因类别 + issues: write 权限提示,仍失败退出", async () => {
+  const ctx = setup();
+  draftReply = { edits: [{ path: "docs/zh/../../escape.md", create: true, content: "x" }] };
+  const summary = join(ctx.root, "summary.md");
+  const r = await runDraft(ctx, {
+    GITHUB_STEP_SUMMARY: summary,
+    FAKE_GH_RULES: JSON.stringify([
+      ["^issue comment 12", "gh: Resource not accessible by integration (HTTP 403)\n", 1],
+      ...JSON.parse(rules(ctx)),
+    ]),
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.gh, /issue comment 12 --body-file/); // 确实试过回帖
+  const hint = "无法在 Issue #12 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 issues: write 权限";
+  assert.ok(r.stderr.includes(hint), r.stderr);
+  assert.ok(readLog(summary).includes(`(本次失败原因类别:**模型输出校验失败**)——${hint}`));
 });

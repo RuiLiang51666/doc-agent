@@ -9,7 +9,15 @@ import { runStage } from "./llm.mjs";
 import { embedContract } from "./contract.mjs";
 import { loadConfig } from "./config.mjs";
 import { codeChangedFiles, resolveDiffRange, describeRange } from "./diff.mjs";
-import { planInput, findPlanIssue, classifyError, stepSummary, formatStats, normalizePlanItems } from "./planlib.mjs";
+import {
+  planInput,
+  findPlanIssue,
+  classifyError,
+  stepSummary,
+  formatStats,
+  normalizePlanItems,
+  reportCommentFailure,
+} from "./planlib.mjs";
 import { sh, shRead } from "./sh.mjs";
 
 const { GITHUB_REPOSITORY, PR_NUMBER, PR_TITLE, MERGE_SHA } = process.env;
@@ -89,7 +97,8 @@ ${skipped || "(无)"}
   writeFileSync(tmp("plan.md"), body);
   sh(`gh issue create --title "📝 docs: ${title} (#${PR_NUMBER})" --label docs/plan --body-file "${tmp("plan.md")}"`);
 } catch (e) {
-  // 失败时在被合并的代码 PR 下回帖(PR 评论走 issues 接口,plan job 的 issues: write 权限即可)
+  // 失败时在被合并的代码 PR 下回帖。PR 评论虽走 issues 接口,但对 PR 编号 GitHub 按 Pull requests 权限判定:
+  // plan job 必须有 pull-requests: write,只有 issues: write 会 403(Apollo 首轮回放实测)
   const kind = classifyError(e);
   const body = `⚠️ doc-agent 文档影响评估失败 —— 原因类别:**${kind.label}**
 
@@ -103,7 +112,8 @@ ${String(e.message || e).slice(0, 500)}
     writeFileSync(tmp("plan-err.md"), body);
     sh(`gh api repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments -F body=@"${tmp("plan-err.md")}"`);
   } catch (err) {
-    console.error(`在 PR #${PR_NUMBER} 下回帖失败:${err.message}`);
+    // 回帖被拒不许静默:日志 + Step Summary 写明原因类别与权限提示,job 照样失败退出
+    reportCommentFailure({ target: `PR #${PR_NUMBER}`, permission: "pull-requests: write", kind, err });
   }
   console.error(e);
   process.exit(1);

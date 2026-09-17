@@ -27,12 +27,14 @@ fork 里的 workflow 用 `uses: <你>/doc-agent@<tag>` 引用,所以内核必须
 ```bash
 cd /Users/rui/claude/doc-agent
 git log --oneline -3          # 确认 P0(1c5e664)、P1(e3d0d36)都在
-node --test test/*.test.mjs   # 71 个用例应全过
+node --test test/*.test.mjs   # 77 个用例应全过
 git push origin main
-git tag v1.2 && git push origin v1.2
+git tag v1.2.1 && git push origin v1.2.1
 ```
 
-打完后把 `apollo-fork-doc-agent.yml` 里三处 `RuiLiang51666/doc-agent@v1.2` 改成你的 `<owner>/<repo>@v1.2`。想边调边试可以先用 `@main`,稳定了再钉 tag。
+打完后把 `apollo-fork-doc-agent.yml` 里三处 `RuiLiang51666/doc-agent@v1.2.1` 改成你的 `<owner>/<repo>@v1.2.1`。想边调边试可以先用 `@main`,稳定了再钉 tag。
+
+> **已按 v1.2 搭好 fork 的**:v1.2.1 修了 plan job 的权限(`pull-requests` 从 `read` 改为 `write`;只读时,plan 失败在代码 PR 下回帖会被 403 拒绝,原因只留在 Actions 日志里)。推送 `v1.2.1` 后,用新版 `apollo-fork-doc-agent.yml` 覆盖 `replay-base` 上的 `.github/workflows/doc-agent.yml` 并推送(快进,别覆盖已合并的回放提交)。注意:Re-run 旧运行沿用原提交上的 workflow,用不上新权限。
 
 ## 2. [写] 建回放基线分支 `replay-base`,同时处理掉上游 CI
 
@@ -54,7 +56,7 @@ git rm -r -q .github/workflows
 # ② 只放 doc-agent 这一个
 mkdir -p .github/workflows
 cp /Users/rui/claude/doc-agent/examples/apollo-fork-doc-agent.yml .github/workflows/doc-agent.yml
-# 记得先把里面的 RuiLiang51666/doc-agent@v1.2 换成你自己的
+# 记得先把里面的 RuiLiang51666/doc-agent@v1.2.1 换成你自己的
 git add .github/workflows/doc-agent.yml
 git commit -m "replay: 只保留 doc-agent workflow,移除上游 CI"
 
@@ -154,7 +156,7 @@ gh pr create --repo <你>/apollo --base replay-base --head replay/pr-5649 \
 3. **在文档 PR 上提交 review**:点 "Start a review",一次留 **2–3 条**行内意见再 "Submit review"。
    → 触发 `revise`:一次运行处理全部待处理意见,一个提交,每条线程回一句 `Done in <sha> ✅` 并 resolve。这一条专门验并发互斥(P1 能力 1),值得刻意跑一次。
 
-每一步都去 Actions 页看 job 日志与 Step Summary;失败时 doc-agent 会在对应位置回帖写明原因类别(超预算 / 模型接口报错 / 模型输出被截断 / 模型输出校验失败 / 推送失败 / 其他异常)。
+每一步都去 Actions 页看 job 日志与 Step Summary;失败时 doc-agent 会在对应位置回帖写明原因类别(超预算 / 模型接口报错 / 模型输出被截断 / 模型输出校验失败 / 推送失败 / 其他异常);回帖本身被拒时(如 403),Step Summary 里会写明原因类别和该检查的权限。
 
 ## 10. 与标准答案对比
 
@@ -221,6 +223,7 @@ diff -u <scratchpad>/golden/pr-5649/after/docs/zh/deployment/quick-start.md /tmp
 - **`github.token` 创建的 PR 不会再触发 workflow**(GitHub 的防循环机制)。这条链路不受影响:合并回放 PR、评论 `/approve`、提交 review 都是你本人操作。
 - **计划 Issue 是幂等的**:同一个源 PR 已有计划 Issue 时 plan 会跳过。想重跑就先关掉(`--state all` 都算)那个 Issue 再说,或换一个回放 PR。
 - **文档 PR 也是幂等的**:重复 `/approve` 时,若 `docs/plan-<Issue号>` 分支的 PR 已存在就跳过。
+- **重复行上的 search/replace**:#5649 的 `quick-start.md` 有 6 行相同的 `export SPRING_PROFILES_ACTIVE=...` 和 4 个 `#### 注意事项`。draft 的编辑只给其中一行会被拒(报「出现 N 次,必须唯一」,归类「模型输出校验失败」,在计划 Issue 下回帖);提示词已要求带上区分上下文。真遇到了,重新评论 `/approve` 重试即可。
 - **连续回放多个 PR 时的基线**:本手册的 `replay-base` 停在 #5649 的父提交。要接着回放 #5580 / #5655 / #5665,两种走法——(a) 沿用同一条 `replay-base`,每轮先把上一轮的文档 PR 合并回去,再用 `--base replay-base` 应用下一个 PR 的代码(跨过中间的上游提交,可能冲突,脚本会报);(b) 每个 PR 单独建 `replay-base-<N>`(= 该 PR 的父提交 + 那个 workflow 提交)并把默认分支切过去,永不冲突,代价是每轮改一次默认分支。稳妥起见首轮之后建议走 (b)。
 - **模型选择**:默认 `glm-4.6`(上下文 200K),plan 预算 60000 token 有充足余量。换 128K 的模型也够,但别换回 `glm-4-plus`(最大输出只有 4K,大页翻译会被截断——v1.2 起会明确报「模型输出被截断」而不是写半截译文)。
 

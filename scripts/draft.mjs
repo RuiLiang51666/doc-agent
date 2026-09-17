@@ -15,6 +15,7 @@ import { loadConfig, isSourceDoc, checkNewDocPath } from "./config.mjs";
 import { resolveDiffRange, describeRange, codeChangedFiles, diffFilesFor } from "./diff.mjs";
 import { buildDiffText } from "./budget.mjs";
 import { classifyError } from "./errors.mjs";
+import { reportCommentFailure } from "./planlib.mjs";
 import { commitPaths, pushWithRebase } from "./git.mjs";
 
 const { GITHUB_REPOSITORY, ISSUE_NUMBER, ISSUE_BODY } = process.env;
@@ -142,7 +143,10 @@ Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
   );
   try {
     sh(`gh issue comment ${ISSUE_NUMBER} --body-file "${tmp("draft-err.md")}"`);
-  } catch {}
+  } catch (err) {
+    // 回帖被拒不许静默(同 plan):日志 + Step Summary 写明原因类别与权限提示
+    reportCommentFailure({ target: `Issue #${ISSUE_NUMBER}`, permission: "issues: write", kind, err });
+  }
   console.error(e);
   process.exit(1);
 }
