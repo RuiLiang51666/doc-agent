@@ -1,6 +1,7 @@
 // draft.mjs 端到端离线测试:本地裸仓库当远端 + 假 gh + 本机 mock 大模型。
 // 覆盖:计划含新建文档 → 新建的中文文档与新生成的英文译文都进提交并推送;取 diff 按 rebase 合并口径含 PR 全部提交;
-// 模型要在源文档目录外新建 → 拒绝落盘,在计划 Issue 下回帖「模型输出校验失败」,不推送、不建 PR;回帖被拒(403)也不静默。
+// 模型要在源文档目录外新建 → 拒绝落盘,在计划 Issue 下回帖「模型输出校验失败」,不推送、不建 PR;回帖被拒(403)也不静默;
+// 本阶段模型用量逐次打日志、合计写进 Step Summary。
 // 跑:node --test
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -16,16 +17,19 @@ const DRAFT = fileURLToPath(new URL("../scripts/draft.mjs", import.meta.url));
 let llm;
 let draftReply;
 before(async () => {
+  // 用量:翻译(translate-x)故意不返回 usage,验「接口未返回」的汇总加注
+  const usage = (p, c) => ({ prompt_tokens: p, completion_tokens: c, total_tokens: p + c });
   llm = await startMockLLM((body) => {
-    if (body.model === "draft-x") return { content: JSON.stringify(draftReply) };
+    if (body.model === "draft-x") return { content: JSON.stringify(draftReply), usage: usage(3000, 200) };
     if (body.model === "sync-x")
       return {
         content: JSON.stringify({
           edits: [{ old_string: "Reads.", new_string: "Reads. Supports TTL; see [Expiration](guide/ttl.md)." }],
         }),
+        usage: usage(1000, 50),
       };
     if (body.model === "translate-x") return { content: "# Expiration\n\nSet a TTL with `setTtl(ms)`." };
-    return { content: "译文质检:通过" };
+    return { content: "译文质检:通过", usage: usage(2000, 100) };
   });
 });
 after(() => llm.close());
@@ -159,4 +163,36 @@ test("draft:失败回帖被拒(HTTP 403)→ 不静默:日志与 Step Summary 写
   const hint = "无法在 Issue #12 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 issues: write 权限";
   assert.ok(r.stderr.includes(hint), r.stderr);
   assert.ok(readLog(summary).includes(`(本次失败原因类别:**模型输出校验失败**)——${hint}`));
+});
+
+test("draft:本阶段全部模型调用(初稿 + 译文同步 + 整篇翻译 + 译文质检)逐次打日志,合计按模型写进 Step Summary", async () => {
+  const ctx = setup();
+  draftReply = {
+    edits: [
+      { path: "docs/zh/cache.md", old_string: "读取。", new_string: "读取。支持 TTL,见[过期策略](guide/ttl.md)。" },
+      { path: "docs/zh/guide/ttl.md", create: true, content: "# 过期策略\n\n用 `setTtl(ms)` 设置过期时间。" },
+    ],
+  };
+  const summary = join(ctx.root, "summary.md");
+  const r = await runDraft(ctx, { GITHUB_STEP_SUMMARY: summary });
+  assert.equal(r.code, 0, r.stderr);
+  for (const line of [
+    "[llm] draft · draft-x:token 用量 输入 3000 / 输出 200 / 合计 3200;重试 0 次,累计等待 0s",
+    "[llm] sync · sync-x:token 用量 输入 1000 / 输出 50 / 合计 1050;重试 0 次,累计等待 0s",
+    "[llm] translate · translate-x:token 用量 接口未返回;重试 0 次,累计等待 0s",
+    "[llm] qa · fast-x:token 用量 输入 2000 / 输出 100 / 合计 2100;重试 0 次,累计等待 0s",
+  ])
+    assert.ok(r.stdout.includes(line), line);
+  // 同步与翻译并行,行序不定:逐行核对
+  const md = readLog(summary);
+  for (const row of [
+    "**doc-agent 模型用量(draft 阶段合计)**",
+    "| draft-x | 1 | 3000 | 200 | 3200 | 0 | 0s |",
+    "| sync-x | 1 | 1000 | 50 | 1050 | 0 | 0s |",
+    "| translate-x | 1 | 0 | 0 | 0 | 0 | 0s |",
+    "| fast-x | 1 | 2000 | 100 | 2100 | 0 | 0s |",
+    "| **合计** | 4 | 6000 | 350 | 6350 | 0 | 0s |",
+    "其中 1 次接口未返回 usage(token 数未计入这几次)。",
+  ])
+    assert.ok(md.includes(row), `${row}\n---\n${md}`);
 });

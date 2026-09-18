@@ -89,11 +89,68 @@ function readCompletion(json) {
   return content;
 }
 
+// ── 用量与重试记录 ──
+// 每次调用结束(成功或失败)记一条并打一行日志:token 用量取接口返回的 usage(没有就写「接口未返回」)、重试次数、累计等待。
+// 进程内累积(一次 plan / draft 运行 = 一个进程),阶段脚本退出时用 usageSummary 汇总写进 Step Summary,供核算成本。
+export const llmCalls = [];
+const secs = (ms) => `${Math.round(ms / 100) / 10}s`;
+
+// 接口的 usage(OpenAI 兼容:prompt_tokens / completion_tokens / total_tokens);没有数字字段视为未返回
+function normUsage(u) {
+  const n = (v) => (Number.isFinite(v) ? v : null);
+  const prompt = n(u?.prompt_tokens);
+  const completion = n(u?.completion_tokens);
+  if (prompt === null && completion === null && n(u?.total_tokens) === null) return null;
+  return { prompt: prompt ?? 0, completion: completion ?? 0, total: n(u.total_tokens) ?? (prompt ?? 0) + (completion ?? 0) };
+}
+
+/** 一次调用的日志行(给人看)。 */
+export function formatCall(c) {
+  const u = c.usage
+    ? `输入 ${c.usage.prompt} / 输出 ${c.usage.completion} / 合计 ${c.usage.total}`
+    : "接口未返回";
+  return `[llm] ${c.stage ? `${c.stage} · ` : ""}${c.model}${c.ok ? "" : " 调用失败"}:token 用量 ${u};重试 ${c.retries} 次,累计等待 ${secs(c.waitedMs)}`;
+}
+
+/** 本进程(本阶段)全部调用的合计,按模型分行的 Markdown;没调用过模型返回 ""。 */
+export function usageSummary(calls, title) {
+  if (!calls.length) return "";
+  const rows = new Map();
+  const add = (key, c) => {
+    const r = rows.get(key) || { n: 0, prompt: 0, completion: 0, total: 0, retries: 0, waitedMs: 0 };
+    r.n++;
+    r.prompt += c.usage?.prompt ?? 0;
+    r.completion += c.usage?.completion ?? 0;
+    r.total += c.usage?.total ?? 0;
+    r.retries += c.retries;
+    r.waitedMs += c.waitedMs;
+    rows.set(key, r);
+  };
+  for (const c of calls) add(c.model, c);
+  for (const c of calls) add("**合计**", c);
+  const failed = calls.filter((c) => !c.ok).length;
+  const missing = calls.filter((c) => !c.usage).length;
+  const notes = [failed && `${failed} 次调用失败`, missing && `${missing} 次接口未返回 usage(token 数未计入这几次)`];
+  return [
+    `**doc-agent 模型用量(${title} 阶段合计)**`,
+    "",
+    "| 模型 | 调用次数 | 输入 token | 输出 token | 合计 token | 重试次数 | 累计等待 |",
+    "|---|---|---|---|---|---|---|",
+    ...[...rows].map(([k, r]) => `| ${k} | ${r.n} | ${r.prompt} | ${r.completion} | ${r.total} | ${r.retries} | ${secs(r.waitedMs)} |`),
+    ...(failed || missing ? ["", `其中 ${notes.filter(Boolean).join(";")}。`] : []),
+  ].join("\n");
+}
+
 /**
- * 调一次 chat/completions,重试策略见上。wait / random 可注入(测试里不真等)。
+ * 调一次 chat/completions,重试策略见上。wait / random / log 可注入(测试里不真等、收日志);stage 只用于日志与汇总。
  * 设了 LLM_MAX_TOKENS 才带 max_tokens,不设沿用接口默认。
  */
-export async function callLLM(system, user, model = MODEL, { wait = sleep, random = Math.random } = {}) {
+export async function callLLM(
+  system,
+  user,
+  model = MODEL,
+  { wait = sleep, random = Math.random, log = console.log, stage = "" } = {}
+) {
   const maxTokens = Number(process.env.LLM_MAX_TOKENS) || 0;
   const opts = {
     method: "POST",
@@ -122,28 +179,43 @@ export async function callLLM(system, user, model = MODEL, { wait = sleep, rando
     await wait(d);
     return true;
   };
-  for (let attempt = 1; ; attempt++) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT); // 挂住就中止,避免无限等
-    let res;
-    try {
-      res = await fetch(`${BASE_URL}/chat/completions`, { ...opts, signal: ctrl.signal });
-    } catch (e) {
+  // 结束时(成功、抛错都算)记一条用量;截断时接口通常也给了 usage,照样记上
+  const call = { stage, model, ok: false, usage: null, retries: 0, waitedMs: 0 };
+  try {
+    for (let attempt = 1; ; attempt++) {
+      call.retries = attempt - 1;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), TIMEOUT); // 挂住就中止,避免无限等
+      let res;
+      try {
+        res = await fetch(`${BASE_URL}/chat/completions`, { ...opts, signal: ctrl.signal });
+      } catch (e) {
+        clearTimeout(timer);
+        if (++networkFailures >= NETWORK_MAX_ATTEMPTS || !(await backoff(attempt))) throw e;
+        continue;
+      }
       clearTimeout(timer);
-      if (++networkFailures >= NETWORK_MAX_ATTEMPTS || !(await backoff(attempt))) throw e;
-      continue;
+      if (res.ok) {
+        const json = await res.json();
+        call.usage = normUsage(json?.usage);
+        const content = readCompletion(json);
+        call.ok = true;
+        return content;
+      }
+      const text = await res.text();
+      const code = errorCode(text);
+      const retryable =
+        RATE_LIMIT_CODES.has(code) || (!QUOTA_CODES.has(code) && (res.status === 429 || res.status >= 500));
+      if (!retryable) throw new Error(`LLM ${res.status}: ${text}`);
+      if (!(await backoff(attempt, retryAfterMs(res.headers?.get?.("retry-after")))))
+        throw new Error(
+          `LLM ${res.status}: ${text}(已重试 ${attempt - 1} 次、累计等待 ${Math.round(waited / 1000)}s;再等就超过上限 ${Math.round(maxWait / 1000)}s,见 LLM_RETRY_MAX_WAIT_MS)`
+        );
     }
-    clearTimeout(timer);
-    if (res.ok) return readCompletion(await res.json());
-    const text = await res.text();
-    const code = errorCode(text);
-    const retryable =
-      RATE_LIMIT_CODES.has(code) || (!QUOTA_CODES.has(code) && (res.status === 429 || res.status >= 500));
-    if (!retryable) throw new Error(`LLM ${res.status}: ${text}`);
-    if (!(await backoff(attempt, retryAfterMs(res.headers?.get?.("retry-after")))))
-      throw new Error(
-        `LLM ${res.status}: ${text}(已重试 ${attempt - 1} 次、累计等待 ${Math.round(waited / 1000)}s;再等就超过上限 ${Math.round(maxWait / 1000)}s,见 LLM_RETRY_MAX_WAIT_MS)`
-      );
+  } finally {
+    call.waitedMs = waited;
+    llmCalls.push(call);
+    log(formatCall(call));
   }
 }
 
@@ -232,7 +304,7 @@ const STAGE_SHAPE = {
  * @returns 有 shape 的阶段返回校验后的对象;无 shape 的返回模型原始文本。
  */
 export async function runStage({ stage, system, user }) {
-  const raw = await callLLM(system, user, modelFor(stage));
+  const raw = await callLLM(system, user, modelFor(stage), { stage });
   const shape = STAGE_SHAPE[stage];
   return shape ? parseStage(raw, shape) : raw;
 }

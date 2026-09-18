@@ -1,6 +1,6 @@
 // plan.mjs 端到端离线测试:临时 git 仓库 + 假 gh(记录每次调用)+ 本机 mock 大模型接口。
 // 覆盖:无代码改动不静默、已有计划 Issue 跳过、各类异常(含输出被截断)在 PR 下回帖并失败退出、回帖被拒(403)也不静默、正常开 Issue、
-// rebase 合并按 PR 全部提交取 diff、计划里的新建文档与越界路径。
+// rebase 合并按 PR 全部提交取 diff、计划里的新建文档与越界路径;「无需更新」也回帖到源 PR(理由相同不重发)、模型用量进日志与 Step Summary。
 // 跑:node --test
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -11,6 +11,7 @@ import { join, dirname } from "node:path";
 import { execFileSync, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { embedContract } from "../scripts/contract.mjs";
+import { noUpdateComment } from "../scripts/planlib.mjs";
 
 const PLAN = fileURLToPath(new URL("../scripts/plan.mjs", import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "doc-agent-plan-"));
@@ -89,22 +90,42 @@ chmodSync(join(bin, "gh"), 0o755);
 let reply = { status: 200, content: '{"update":false,"reason":"x"}' };
 let llmCalls = 0;
 let lastRequest = null;
+// 替身自己出错也必须回响应(理由同 fakes.mjs 的 startMockLLM):不回响应 = 被测进程干等 LLM_TIMEOUT_MS
+// (默认 120s)再重试三次,用例表现成「永远不结束」,真正的原因一个字都看不到。兜成 400,4xx 不重试。
 const server = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
-    llmCalls++;
-    lastRequest = JSON.parse(body);
-    if (reply.status !== 200) {
-      res.writeHead(reply.status);
-      return res.end('{"error":"bad request"}');
+    try {
+      llmCalls++;
+      lastRequest = JSON.parse(body);
+      if (reply.status !== 200) {
+        res.writeHead(reply.status);
+        return res.end('{"error":"bad request"}');
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: reply.content }, finish_reason: reply.finish || "stop" }],
+          usage: reply.usage, // 没设就不带(JSON 里省略)
+        })
+      );
+    } catch (e) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `mock LLM 替身出错:${e.message}` } }));
     }
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ choices: [{ message: { content: reply.content }, finish_reason: reply.finish || "stop" }] }));
   });
 });
+server.unref(); // 替身不该拖住测试进程退出
 before(() => new Promise((r) => server.listen(0, "127.0.0.1", r)));
-after(() => server.close());
+// 先掐连接再 close:只 close 的话,万一有子进程挂住没退,这里会一直等下去
+after(
+  () =>
+    new Promise((r) => {
+      server.closeAllConnections();
+      server.close(r);
+    })
+);
 
 let runs = 0;
 function runPlan(sha, env = {}) {
@@ -269,4 +290,53 @@ test("plan:rebase 合并(PR 两个提交)→ diff 含全部提交;新建文档�
   assert.equal(bad.code, 1);
   assert.match(bad.gh, /原因类别:\*\*模型输出校验失败\*\*/);
   assert.doesNotMatch(bad.gh, /issue create/);
+});
+
+// ── 「无需更新」也回帖到源 PR;模型用量写进日志与 Step Summary ──
+const NO_UPDATE_REASON = "H2 Console 的访问配置未在现有文档中体现,与文档定位一致,无需更新文档。";
+const RUN_ENV = { GITHUB_SERVER_URL: "https://github.com", GITHUB_RUN_ID: "35197965194" };
+const commentsRoute = (comments) => JSON.stringify({ "repos/o/r/issues/7/comments?per_page=100": [comments] });
+
+test("plan:模型判定无需更新 → 在被合并的 PR 下回帖「已评估、无需更新」+ 理由原文 + 运行链接,退出 0;日志与 Step Summary 带模型用量", async () => {
+  reply = {
+    status: 200,
+    content: JSON.stringify({ update: false, reason: NO_UPDATE_REASON }),
+    usage: { prompt_tokens: 58934, completion_tokens: 120, total_tokens: 59054 },
+  };
+  const r = await runPlan(CODE_SHA, { ...RUN_ENV, FAKE_GH_API: commentsRoute([]) });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.gh, /^gh api --paginate --slurp repos\/o\/r\/issues\/7\/comments\?per_page=100$/m); // 先查有没有发过
+  const posted = r.gh.split(/^gh api repos\/o\/r\/issues\/7\/comments -F body=@\S+\n/m)[1] || "";
+  assert.match(posted, /^✅ doc-agent 已评估本 PR 的文档影响,结论:\*\*无需更新文档\*\*。/);
+  assert.ok(posted.includes(`> ${NO_UPDATE_REASON}`), posted);
+  assert.ok(posted.includes("运行记录:https://github.com/o/r/actions/runs/35197965194"), posted);
+  assert.match(posted, /<!-- doc-agent:no-update [0-9a-f]{12} -->/);
+  assert.doesNotMatch(r.gh, /issue create/);
+  // 用量:每次调用一行日志;Step Summary 里有本阶段合计
+  assert.ok(r.stdout.includes("[llm] plan · strong-x:token 用量 输入 58934 / 输出 120 / 合计 59054;重试 0 次,累计等待 0s"), r.stdout);
+  assert.match(r.summary, /Docs ✓ 无需更新/);
+  assert.ok(r.summary.includes("**doc-agent 模型用量(plan 阶段合计)**"), r.summary);
+  assert.ok(r.summary.includes("| strong-x | 1 | 58934 | 120 | 59054 | 0 | 0s |"), r.summary);
+});
+
+test("plan:同一 PR 重复触发、理由相同(运行链接不同)→ 不重复发「无需更新」评论", async () => {
+  reply = { status: 200, content: JSON.stringify({ update: false, reason: NO_UPDATE_REASON }) };
+  const earlier = noUpdateComment({ reason: NO_UPDATE_REASON, runLink: "https://github.com/o/r/actions/runs/1" });
+  const r = await runPlan(CODE_SHA, { ...RUN_ENV, FAKE_GH_API: commentsRoute([{ body: "别人的评论" }, { body: earlier }]) });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /PR #7 下已有理由相同的「无需更新」评论,不重复发/);
+  assert.doesNotMatch(r.gh, /-F body=@/);
+  // 接口没返回 usage → 日志与 Step Summary 如实写明
+  assert.ok(r.stdout.includes("[llm] plan · strong-x:token 用量 接口未返回;重试 0 次,累计等待 0s"), r.stdout);
+  assert.match(r.summary, /1 次接口未返回 usage/);
+});
+
+test("plan:「无需更新」回帖被拒(HTTP 403)→ 结论不变、退出 0;日志与 Step Summary 写明结论 + pull-requests: write 权限提示", async () => {
+  reply = { status: 200, content: JSON.stringify({ update: false, reason: NO_UPDATE_REASON }) };
+  const r = await runPlan(CODE_SHA, { ...RUN_ENV, FAKE_GH_API: commentsRoute([]), FAKE_GH_COMMENT_403: "1" });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.gh, /gh api repos\/o\/r\/issues\/7\/comments -F body=@/); // 确实试过回帖
+  const hint = "无法在 PR #7 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限";
+  assert.ok(r.stderr.includes(hint), r.stderr);
+  assert.ok(r.summary.includes(`> ⚠️ **doc-agent 回帖没发出去**(本次结论:**无需更新文档**)——${hint}`), r.summary);
 });

@@ -44,8 +44,14 @@ if (args[0] === "api" && !args.includes("-f") && !args.includes("-F")) {
 }
 
 /**
- * 本机 mock 大模型(OpenAI 兼容 /chat/completions)。handler(请求体) → { content, finish? } 或 { status, body };
- * 可以是 async。requests 记下每次请求体。
+ * 本机 mock 大模型(OpenAI 兼容 /chat/completions)。handler(请求体) → { content, finish?, usage? } 或 { status, body };
+ * 可以是 async。requests 记下每次请求体。usage 原样放进响应(没给就不带,模拟接口不返回用量)。
+ *
+ * 铁律:替身自己出错(handler 抛异常、新加的分支忘了 return、请求体不是 JSON)也必须回一个响应。
+ * 不回响应的代价不是「这条用例报错」,而是「这条用例永远不结束」:被测的 callLLM 会干等 LLM_TIMEOUT_MS
+ * (默认 120s)才 abort,abort 归类为网络异常还要再重试到 NETWORK_MAX_ATTEMPTS 次(≈6 分钟),
+ * 期间 --test-timeout 早就把用例判成 timed out,真正的原因(替身写错了)却一个字都看不到。
+ * 所以这里统一兜成 400(llm.mjs 对 4xx 不重试):用例立刻失败,且失败信息直接写着替身哪里错了。
  */
 export async function startMockLLM(handler) {
   const requests = [];
@@ -53,22 +59,38 @@ export async function startMockLLM(handler) {
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", async () => {
-      const body = JSON.parse(raw);
-      requests.push(body);
-      const r = await handler(body);
-      if (r.status && r.status !== 200) {
-        res.writeHead(r.status);
-        return res.end(r.body || "{}");
+      try {
+        const body = JSON.parse(raw);
+        requests.push(body);
+        const r = await handler(body);
+        if (!r || typeof r !== "object")
+          throw new Error(`handler 对 model=${body?.model} 没有返回值(漏了 return?)`);
+        if (r.status && r.status !== 200) {
+          res.writeHead(r.status);
+          return res.end(r.body || "{}");
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ choices: [{ message: { content: r.content }, finish_reason: r.finish || "stop" }], usage: r.usage })
+        );
+      } catch (e) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: `mock LLM 替身出错:${e.message}` } }));
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ choices: [{ message: { content: r.content }, finish_reason: r.finish || "stop" }] }));
     });
   });
+  server.unref(); // 替身不该拖住测试进程退出
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     requests,
-    close: () => new Promise((r) => server.close(r)),
+    // close 必须先掐掉连接:server.close() 只等现有连接自己结束,
+    // 万一有个子进程挂住没退,after 钩子就会一直等下去,整个测试文件再也跑不完。
+    close: () =>
+      new Promise((r) => {
+        server.closeAllConnections();
+        server.close(r);
+      }),
   };
 }
 

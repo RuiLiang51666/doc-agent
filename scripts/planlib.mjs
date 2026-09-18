@@ -1,7 +1,9 @@
-// plan 阶段的护栏与输入组装:异常分类、计划 Issue 查重、计划条目路径校验、Step Summary、读文档 + 组装 prompt。
-// 其中「失败回帖被拒时的提示」(reportCommentFailure)draft / revise 也用。
-import { readFileSync, appendFileSync, existsSync } from "node:fs";
+// plan 阶段的护栏与输入组装:异常分类、计划 Issue 查重、计划条目路径校验、Step Summary、源 PR 回帖、读文档 + 组装 prompt。
+// 其中「回帖被拒时的提示」(reportCommentFailure)draft / revise 也用。
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { sh } from "./sh.mjs";
 import { readContract } from "./contract.mjs";
 import { isSourceDoc, assertRepoPath, checkNewDocPath } from "./config.mjs";
 import { trackedFiles, diffFilesFor } from "./diff.mjs";
@@ -60,16 +62,59 @@ const ghReason = (err) => {
 };
 
 /**
- * 失败回帖本身也失败了(常见 403:workflow 没给对应的写权限)时调用,不许再静默吞掉(plan / draft / revise 共用):
- * 日志打出「无法在 <位置> 下回帖:<原因>,请检查 workflow 的 <权限> 权限」,连同本次失败的原因类别写进 Step Summary。
- * 返回那行提示。调用方照样以失败退出。
+ * 回帖本身失败了(常见 403:workflow 没给对应的写权限)时调用,不许再静默吞掉(plan / draft / revise 共用):
+ * 日志打出「无法在 <位置> 下回帖:<原因>,请检查 workflow 的 <权限> 权限」,连同背景写进 Step Summary。
+ * 背景默认是「本次失败原因类别」(传 kind);不是失败说明的回帖(如 plan 的「无需更新」结论)传 context。返回那行提示。
  */
-export function reportCommentFailure({ target, permission, kind, err, env = process.env }) {
+export function reportCommentFailure({ target, permission, err, kind, context, env = process.env }) {
   const hint = `无法在 ${target} 下回帖:${ghReason(err)},请检查 workflow 的 ${permission} 权限`;
   console.error(hint);
-  stepSummary(`> ⚠️ **失败说明没能回帖**(本次失败原因类别:**${kind.label}**)——${hint}`, env);
+  stepSummary(`> ⚠️ **doc-agent 回帖没发出去**(${context || `本次失败原因类别:**${kind.label}**`})——${hint}`, env);
   return hint;
 }
+
+/**
+ * 在被合并的代码 PR 下回帖(plan 的失败说明与「无需更新」结论共用)。PR 评论走 issues 接口,需要 pull-requests: write。
+ * 被拒不抛:走 reportCommentFailure(日志 + Step Summary)。返回是否发出。
+ */
+export function commentOnPr({ repo, pr, body, file, kind, context, run = sh, env = process.env }) {
+  try {
+    writeFileSync(file, body);
+    run(`gh api repos/${repo}/issues/${pr}/comments -F body=@"${file}"`);
+    return true;
+  } catch (err) {
+    reportCommentFailure({ target: `PR #${pr}`, permission: "pull-requests: write", err, kind, context, env });
+    return false;
+  }
+}
+
+/** 本次 Actions 运行的链接;server 形态没有 GITHUB_RUN_ID,返回 ""。 */
+export const runUrl = (env = process.env) =>
+  env.GITHUB_RUN_ID
+    ? `${env.GITHUB_SERVER_URL || "https://github.com"}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`
+    : "";
+
+// 「无需更新」评论末尾的隐藏标记,带理由的指纹:同一 PR 重复触发(Re-run、webhook 重投)且理由相同,就认出来不重发
+const noUpdateMark = (reason) =>
+  `<!-- doc-agent:no-update ${createHash("sha256").update(String(reason ?? "")).digest("hex").slice(0, 12)} -->`;
+
+/** plan 判定无需更新时,发在被合并的代码 PR 下的评论:已评估、结论、模型理由原文、运行链接。 */
+export function noUpdateComment({ reason, runLink }) {
+  const quoted = String(reason || "(模型没有给出理由)")
+    .split("\n")
+    .map((l) => `> ${l}`)
+    .join("\n");
+  return `✅ doc-agent 已评估本 PR 的文档影响,结论:**无需更新文档**。
+
+模型给出的理由(原文):
+${quoted}
+${runLink ? `\n运行记录:${runLink}\n` : ""}
+${noUpdateMark(reason)}`;
+}
+
+/** 这些 PR 评论里是否已有理由相同的「无需更新」评论。 */
+export const hasNoUpdateComment = (comments, reason) =>
+  (comments || []).some((c) => String(c.body || "").includes(noUpdateMark(reason)));
 
 /** 当前 checkout 里全部源语言文档:[{ path, text }]。 */
 export const readSourceDocs = (cfg) =>

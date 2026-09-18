@@ -1,13 +1,13 @@
-// 限流退避与输出截断检测的离线单测:mock 掉 fetch,注入 wait / random,不真等、不联网。
+// 限流退避、输出截断检测与用量记录的离线单测:mock 掉 fetch,注入 wait / random / log,不真等、不联网。
 // 跑:node --test
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 process.env.LLM_API_KEY = "test-key";
-const { callLLM, backoffDelay } = await import("../scripts/llm.mjs");
+const { callLLM, backoffDelay, llmCalls, usageSummary } = await import("../scripts/llm.mjs");
 const { classifyError } = await import("../scripts/errors.mjs");
 
-// 按顺序回放响应({ ok, content, finish } 或 { status, body, retryAfter } 或 { throws });记录每次请求体
+// 按顺序回放响应({ ok, content, finish, usage } 或 { status, body, retryAfter } 或 { throws });记录每次请求体
 function scripted(responses) {
   const calls = [];
   global.fetch = async (_url, opts) => {
@@ -18,7 +18,10 @@ function scripted(responses) {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ choices: [{ message: { content: r.content }, finish_reason: r.finish ?? "stop" }] }),
+        json: async () => ({
+          choices: [{ message: { content: r.content }, finish_reason: r.finish ?? "stop" }],
+          ...(r.usage ? { usage: r.usage } : {}),
+        }),
       };
     return {
       ok: false,
@@ -29,10 +32,11 @@ function scripted(responses) {
   };
   return calls;
 }
-// 记录每次等待的毫秒数;random 固定 0.5 → 等待 = 0.75 × d
+// 记录每次等待的毫秒数与日志行;random 固定 0.5 → 等待 = 0.75 × d
 const recorder = () => {
   const waits = [];
-  return { waits, opts: { wait: async (ms) => void waits.push(ms), random: () => 0.5 } };
+  const logs = [];
+  return { waits, logs, opts: { wait: async (ms) => void waits.push(ms), random: () => 0.5, log: (m) => logs.push(m) } };
 };
 const RATE = '{"error":{"code":"1302","message":"您的账户已达到速率限制,请您控制请求频率"}}';
 
@@ -104,4 +108,72 @@ test("callLLM:finish_reason=length → 抛 TruncatedError,归类「模型输出�
   const calls2 = scripted([{ ok: true, content: "x" }]);
   assert.equal(await callLLM("s", "u", "m", recorder().opts), "x");
   assert.ok(!("max_tokens" in calls2[0]));
+});
+
+const USAGE = { prompt_tokens: 58934, completion_tokens: 120, total_tokens: 59054 };
+
+test("callLLM 用量:接口返回 usage → 日志写明输入 / 输出 / 合计 token、重试 0 次,并记进 llmCalls", async () => {
+  delete process.env.LLM_RETRY_MAX_WAIT_MS;
+  scripted([{ ok: true, content: "ok", usage: USAGE }]);
+  const { logs, opts } = recorder();
+  const before = llmCalls.length;
+  assert.equal(await callLLM("s", "u", "glm-4.6", { ...opts, stage: "plan" }), "ok");
+  assert.deepEqual(logs, ["[llm] plan · glm-4.6:token 用量 输入 58934 / 输出 120 / 合计 59054;重试 0 次,累计等待 0s"]);
+  assert.deepEqual(llmCalls.slice(before), [
+    { stage: "plan", model: "glm-4.6", ok: true, usage: { prompt: 58934, completion: 120, total: 59054 }, retries: 0, waitedMs: 0 },
+  ]);
+});
+
+test("callLLM 用量:接口没返回 usage → 日志写「接口未返回」", async () => {
+  scripted([{ ok: true, content: "ok" }]);
+  const { logs, opts } = recorder();
+  await callLLM("s", "u", "m", opts);
+  assert.deepEqual(logs, ["[llm] m:token 用量 接口未返回;重试 0 次,累计等待 0s"]);
+  assert.equal(llmCalls.at(-1).usage, null);
+});
+
+test("callLLM 用量:限流重试 2 次后成功 → 日志写明重试次数与累计等待;重试用尽的失败调用也记一条", async () => {
+  scripted([{ status: 429, body: RATE }, { status: 429, body: RATE }, { ok: true, content: "好了", usage: USAGE }]);
+  let rec = recorder();
+  await callLLM("s", "u", "glm-4.6", { ...rec.opts, stage: "draft" });
+  assert.deepEqual(rec.waits, [1500, 3000]);
+  assert.deepEqual(rec.logs, ["[llm] draft · glm-4.6:token 用量 输入 58934 / 输出 120 / 合计 59054;重试 2 次,累计等待 4.5s"]);
+  assert.equal(llmCalls.at(-1).retries, 2);
+  assert.equal(llmCalls.at(-1).waitedMs, 4500);
+
+  process.env.LLM_RETRY_MAX_WAIT_MS = "10000";
+  scripted([{ status: 429, body: RATE }]);
+  rec = recorder();
+  await assert.rejects(() => callLLM("s", "u", "glm-4.6", { ...rec.opts, stage: "plan" }), /^Error: LLM 429/);
+  assert.deepEqual(rec.logs, ["[llm] plan · glm-4.6 调用失败:token 用量 接口未返回;重试 2 次,累计等待 4.5s"]);
+  assert.equal(llmCalls.at(-1).ok, false);
+  delete process.env.LLM_RETRY_MAX_WAIT_MS;
+});
+
+test("usageSummary:按模型分行 + 合计行;有失败 / 未返回 usage 的调用时加注;没调用过模型返回空串", () => {
+  assert.equal(usageSummary([], "plan"), "");
+  const u = (prompt, completion) => ({ prompt, completion, total: prompt + completion });
+  const md = usageSummary(
+    [
+      { stage: "draft", model: "glm-4.6", ok: true, usage: u(30000, 800), retries: 1, waitedMs: 1500 },
+      { stage: "sync", model: "glm-4.6", ok: true, usage: u(9000, 300), retries: 0, waitedMs: 0 },
+      { stage: "qa", model: "glm-4-flash", ok: true, usage: null, retries: 0, waitedMs: 0 },
+      { stage: "translate", model: "glm-4-flash", ok: false, usage: null, retries: 2, waitedMs: 4500 },
+    ],
+    "draft"
+  );
+  assert.equal(
+    md,
+    [
+      "**doc-agent 模型用量(draft 阶段合计)**",
+      "",
+      "| 模型 | 调用次数 | 输入 token | 输出 token | 合计 token | 重试次数 | 累计等待 |",
+      "|---|---|---|---|---|---|---|",
+      "| glm-4.6 | 2 | 39000 | 1100 | 40100 | 1 | 1.5s |",
+      "| glm-4-flash | 2 | 0 | 0 | 0 | 2 | 4.5s |",
+      "| **合计** | 4 | 39000 | 1100 | 40100 | 3 | 6s |",
+      "",
+      "其中 1 次调用失败;2 次接口未返回 usage(token 数未计入这几次)。",
+    ].join("\n")
+  );
 });

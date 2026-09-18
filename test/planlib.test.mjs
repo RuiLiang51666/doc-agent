@@ -1,4 +1,5 @@
-// plan 护栏的离线单测:异常分类 / 计划 Issue 查重 / 计划条目路径校验 / Step Summary / 回帖被拒的提示。纯函数、零网络。
+// plan 护栏的离线单测:异常分类 / 计划 Issue 查重 / 计划条目路径校验 / Step Summary / 回帖被拒的提示 /
+// 「无需更新」评论与去重。纯函数(回帖的命令执行可注入)、零网络。
 // 跑:node --test
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +13,10 @@ import {
   stepSummary,
   normalizePlanItems,
   reportCommentFailure,
+  commentOnPr,
+  noUpdateComment,
+  hasNoUpdateComment,
+  runUrl,
 } from "../scripts/planlib.mjs";
 import { BudgetError } from "../scripts/budget.mjs";
 import { TruncatedError, PushError } from "../scripts/errors.mjs";
@@ -112,8 +117,58 @@ test("reportCommentFailure:回帖 403 → 日志打出位置 + gh 原因 + 权�
     const expected = "无法在 PR #1 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限";
     assert.equal(hint, expected);
     assert.deepEqual(logged, [expected]);
-    assert.equal(readFileSync(file, "utf8"), `> ⚠️ **失败说明没能回帖**(本次失败原因类别:**模型接口报错**)——${expected}\n\n`);
+    assert.equal(readFileSync(file, "utf8"), `> ⚠️ **doc-agent 回帖没发出去**(本次失败原因类别:**模型接口报错**)——${expected}\n\n`);
   } finally {
     console.error = orig;
   }
+});
+
+test("noUpdateComment / hasNoUpdateComment / runUrl:结论 + 理由原文 + 运行链接;理由相同认作已发,理由不同不算", () => {
+  const env = { GITHUB_SERVER_URL: "https://github.com", GITHUB_REPOSITORY: "o/r", GITHUB_RUN_ID: "35197965194" };
+  assert.equal(runUrl(env), "https://github.com/o/r/actions/runs/35197965194");
+  assert.equal(runUrl({}), ""); // server 形态
+  const reason = "H2 Console 的访问配置未在现有文档中体现,\n与文档定位一致,无需更新文档。";
+  const body = noUpdateComment({ reason, runLink: runUrl(env) });
+  assert.match(body, /doc-agent 已评估本 PR 的文档影响,结论:\*\*无需更新文档\*\*/);
+  assert.ok(body.includes("> H2 Console 的访问配置未在现有文档中体现,\n> 与文档定位一致,无需更新文档。")); // 原文逐行引用
+  assert.ok(body.includes("运行记录:https://github.com/o/r/actions/runs/35197965194"));
+  assert.doesNotMatch(noUpdateComment({ reason }), /运行记录/);
+  // 同一理由、不同运行链接 → 仍认作已发(Re-run 的链接会变)
+  const posted = [{ body: "别的评论" }, { body: noUpdateComment({ reason, runLink: "https://github.com/o/r/actions/runs/1" }) }];
+  assert.equal(hasNoUpdateComment(posted, reason), true);
+  assert.equal(hasNoUpdateComment(posted, "另一条理由"), false);
+  assert.equal(hasNoUpdateComment([], reason), false);
+});
+
+test("commentOnPr:发出返回 true;被拒(403)不抛,返回 false,日志与 Step Summary 带上传入的背景(如「无需更新」结论)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "doc-agent-comment-"));
+  const cmds = [];
+  assert.equal(commentOnPr({ repo: "o/r", pr: "7", body: "正文", file: join(dir, "c.md"), context: "x", run: (c) => cmds.push(c) }), true);
+  assert.match(cmds[0], /^gh api repos\/o\/r\/issues\/7\/comments -F body=@".*c\.md"$/);
+  assert.equal(readFileSync(join(dir, "c.md"), "utf8"), "正文");
+
+  const file = join(dir, "summary.md");
+  const denied = Object.assign(new Error("Command failed"), { stderr: "gh: Resource not accessible by integration (HTTP 403)\n" });
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const ok = commentOnPr({
+      repo: "o/r",
+      pr: "7",
+      body: "正文",
+      file: join(dir, "c.md"),
+      context: "本次结论:**无需更新文档**",
+      run: () => {
+        throw denied;
+      },
+      env: { GITHUB_STEP_SUMMARY: file },
+    });
+    assert.equal(ok, false);
+  } finally {
+    console.error = orig;
+  }
+  assert.equal(
+    readFileSync(file, "utf8"),
+    "> ⚠️ **doc-agent 回帖没发出去**(本次结论:**无需更新文档**)——无法在 PR #7 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限\n\n"
+  );
 });

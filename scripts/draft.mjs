@@ -4,7 +4,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runStage } from "./llm.mjs";
+import { runStage, llmCalls, usageSummary } from "./llm.mjs";
 import { readContract, stripContracts } from "./contract.mjs";
 import { applyEdits } from "./edits.mjs";
 import { loadStyle } from "./style.mjs";
@@ -15,11 +15,17 @@ import { loadConfig, isSourceDoc, checkNewDocPath } from "./config.mjs";
 import { resolveDiffRange, describeRange, codeChangedFiles, diffFilesFor } from "./diff.mjs";
 import { buildDiffText } from "./budget.mjs";
 import { classifyError } from "./errors.mjs";
-import { reportCommentFailure } from "./planlib.mjs";
+import { reportCommentFailure, stepSummary } from "./planlib.mjs";
 import { commitPaths, pushWithRebase } from "./git.mjs";
 
 const { GITHUB_REPOSITORY, ISSUE_NUMBER, ISSUE_BODY } = process.env;
 const tmp = (name) => join(tmpdir(), name);
+
+// 退出时(任何分支,含失败)把本阶段的模型用量合计(初稿 + 译文同步 / 整篇翻译 + 译文质检)写进 Step Summary;没调用过模型就不写
+process.on("exit", () => {
+  const md = usageSummary(llmCalls, "draft");
+  if (md) stepSummary(md);
+});
 
 // 从计划 Issue 解出源 PR 号和待改文件:优先读机读契约(方案 A ①),
 // 读不到(嵌契约之前建的存量 Issue)则回退到正则抠正文。

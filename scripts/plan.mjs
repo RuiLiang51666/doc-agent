@@ -1,11 +1,12 @@
 // docs-plan workflow 的脚本:评估文档影响,有影响就开计划 Issue。
 // 护栏(不静默、幂等):配置的代码路径没改动 → 明确日志 + Step Summary;同一 PR 已有计划 Issue → 跳过;
+// 模型判定无需更新 → 结论与理由也回帖到被合并的代码 PR(理由相同不重发);
 // 任何异常(超预算 / 模型接口报错 / 输出被截断 / schema 校验失败 …)→ 在被合并的代码 PR 下回帖说明原因类别,并以失败退出。
 // 取 diff 以 GitHub 上该 PR 的提交为准,merge / squash / rebase 合并都对(见 diff.mjs 的 resolveDiffRange)。
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runStage } from "./llm.mjs";
+import { runStage, llmCalls, usageSummary } from "./llm.mjs";
 import { embedContract } from "./contract.mjs";
 import { loadConfig } from "./config.mjs";
 import { codeChangedFiles, resolveDiffRange, describeRange } from "./diff.mjs";
@@ -17,11 +18,22 @@ import {
   formatStats,
   normalizePlanItems,
   reportCommentFailure,
+  commentOnPr,
+  noUpdateComment,
+  hasNoUpdateComment,
+  runUrl,
 } from "./planlib.mjs";
 import { sh, shRead } from "./sh.mjs";
+import { ghList } from "./gh.mjs";
 
 const { GITHUB_REPOSITORY, PR_NUMBER, PR_TITLE, MERGE_SHA } = process.env;
 const tmp = (name) => join(tmpdir(), name);
+
+// 退出时(任何分支,含失败)把本阶段的模型用量合计写进 Step Summary,供核算成本;没调用过模型就不写
+process.on("exit", () => {
+  const md = usageSummary(llmCalls, "plan");
+  if (md) stepSummary(md);
+});
 const report = (msg) => {
   console.log(msg);
   stepSummary(msg);
@@ -58,6 +70,23 @@ try {
   const plan = await runStage({ stage: "plan", system, user });
   if (!plan.update) {
     report(`Docs ✓ 无需更新 — ${plan.reason}`);
+    // 结论也回到被合并的代码 PR 下,PR 作者才知道评估过、为什么不改;同一 PR 重复触发且理由相同时不重发。
+    // 回帖(含查已有评论)失败不改变结论:日志 + Step Summary 写明,仍退出 0
+    const context = "本次结论:**无需更新文档**";
+    try {
+      if (hasNoUpdateComment(ghList(`repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100`), plan.reason))
+        console.log(`doc-agent plan:PR #${PR_NUMBER} 下已有理由相同的「无需更新」评论,不重复发。`);
+      else
+        commentOnPr({
+          repo: GITHUB_REPOSITORY,
+          pr: PR_NUMBER,
+          body: noUpdateComment({ reason: plan.reason, runLink: runUrl() }),
+          file: tmp("plan-noupdate.md"),
+          context,
+        });
+    } catch (err) {
+      reportCommentFailure({ target: `PR #${PR_NUMBER}`, permission: "pull-requests: write", err, context });
+    }
     process.exit(0);
   }
 
@@ -108,13 +137,8 @@ ${String(e.message || e).slice(0, 500)}
 
 排查后在 Actions 里 Re-run 该 job 即可重试(同一 PR 已有计划 Issue 时会自动跳过,不会重复开)。`;
   stepSummary(body);
-  try {
-    writeFileSync(tmp("plan-err.md"), body);
-    sh(`gh api repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments -F body=@"${tmp("plan-err.md")}"`);
-  } catch (err) {
-    // 回帖被拒不许静默:日志 + Step Summary 写明原因类别与权限提示,job 照样失败退出
-    reportCommentFailure({ target: `PR #${PR_NUMBER}`, permission: "pull-requests: write", kind, err });
-  }
+  // 回帖被拒不许静默(commentOnPr 内走 reportCommentFailure):日志 + Step Summary 写明原因类别与权限提示,job 照样失败退出
+  commentOnPr({ repo: GITHUB_REPOSITORY, pr: PR_NUMBER, body, file: tmp("plan-err.md"), kind });
   console.error(e);
   process.exit(1);
 }
