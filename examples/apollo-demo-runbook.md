@@ -27,14 +27,16 @@ fork 里的 workflow 用 `uses: <你>/doc-agent@<tag>` 引用,所以内核必须
 ```bash
 cd /Users/rui/claude/doc-agent
 git log --oneline -3          # 确认 P0(1c5e664)、P1(e3d0d36)都在
-node --test test/*.test.mjs   # 101 个用例应全过
+node --test test/*.test.mjs   # 全部用例应全过
 git push origin main
-git tag v1.2.2 && git push origin v1.2.2
+git tag v1.2.3 && git push origin v1.2.3
 ```
 
-打完后把 `apollo-fork-doc-agent.yml` 里三处 `RuiLiang51666/doc-agent@v1.2.2` 改成你的 `<owner>/<repo>@v1.2.2`。想边调边试可以先用 `@main`,稳定了再钉 tag。
+打完后把 `apollo-fork-doc-agent.yml` 里三处 `RuiLiang51666/doc-agent@v1.2.3` 改成你的 `<owner>/<repo>@v1.2.3`。想边调边试可以先用 `@main`,稳定了再钉 tag。
 
-> **已按 v1.2 搭好 fork 的**:v1.2.1 修了 plan job 的权限(`pull-requests` 从 `read` 改为 `write`;只读时,plan 失败在代码 PR 下回帖会被 403 拒绝,原因只留在 Actions 日志里)。推送 `v1.2.2` 后,用新版 `apollo-fork-doc-agent.yml` 覆盖回放基线分支上的 `.github/workflows/doc-agent.yml` 并推送(快进,别覆盖已合并的回放提交)。注意:Re-run 旧运行沿用原提交上的 workflow,用不上新权限。
+> **已按 v1.2 搭好 fork 的**:v1.2.1 修了 plan job 的权限(`pull-requests` 从 `read` 改为 `write`;只读时,plan 失败在代码 PR 下回帖会被 403 拒绝,原因只留在 Actions 日志里)。推送 `v1.2.3` 后,用新版 `apollo-fork-doc-agent.yml` 覆盖回放基线分支上的 `.github/workflows/doc-agent.yml` 并推送(快进,别覆盖已合并的回放提交)。注意:Re-run 旧运行沿用原提交上的 workflow,用不上新权限。
+>
+> **v1.2.3 修的是 #5655 返工(revise)暴露的五件事**:① 超时不再原样重试——同参数重试必然再超时,现在只允许换翻倍的超时再试一次,且有总时长上限 `llm-timeout-total-ms`(默认 900s),失败信息写明实际超时值、尝试次数与建议动作;② 超时可以分阶段配(`llm-timeout-ms-plan/-draft/-revise`),revise 默认从 300s 提到 600s;③ **返工失败的回帖不再把线程算成「已答复」**(带 `<!-- doc-agent:revise-failed -->` 标记),再提交一次 review 就会重新处理那些意见——v1.2.2 在这里会让失败过的意见永远不再被重跑;④ revise 显式设输出上限 8192,并把本阶段用量写进日志与 Step Summary;⑤ 整批调用超时或被截断时,自动退化为**按线程逐条处理**,仍只产生一个提交、逐条回帖。
 >
 > **v1.2.2 修的是 #5655 首轮 draft 暴露的五件事**:① 英文增量同步失败会写明原因类别再兜底(以前静默);② 整篇翻译按标题切块、每次显式设输出上限,25KB 的文档不再必然被截断,任一块截断就明确失败且不落半篇译文;③ 译文质检失败不再被吞,PR 下回帖「译文质检未完成(原因类别)」;④ 客户端超时默认从 120s 提到 300s(可用 `llm-timeout-ms` 配),超时中止计进重试并写「中止,无用量」;⑤ 文档审核只查本次文档 PR 改动的文件,占位 URL 跳过并注明。
 
@@ -58,7 +60,7 @@ git rm -r -q .github/workflows
 # ② 只放 doc-agent 这一个
 mkdir -p .github/workflows
 cp /Users/rui/claude/doc-agent/examples/apollo-fork-doc-agent.yml .github/workflows/doc-agent.yml
-# 记得先把里面的 RuiLiang51666/doc-agent@v1.2.2 换成你自己的
+# 记得先把里面的 RuiLiang51666/doc-agent@v1.2.3 换成你自己的
 git add .github/workflows/doc-agent.yml
 git commit -m "replay: 只保留 doc-agent workflow,移除上游 CI"
 

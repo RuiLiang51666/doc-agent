@@ -31,13 +31,29 @@ inputs:
     required: false
     default: "180000"
   llm-max-tokens:
-    description: "模型单次输出上限(max_tokens);留空 = 接口默认(整篇翻译与译文质检这两个长输出阶段例外,它们始终显式设上限,默认 4096)。输出被截断(finish_reason=length)时按「模型输出被截断」失败回帖,可调大此值"
+    description: "模型单次输出上限(max_tokens);留空 = 接口默认(长输出阶段例外,始终显式设上限:整篇翻译与译文质检 4096,返工 revise 8192)。输出被截断(finish_reason=length)时按「模型输出被截断」失败回帖,可调大此值"
     required: false
     default: ""
   llm-timeout-ms:
-    description: "单次模型调用的客户端超时(毫秒)。默认 300000:glm-4.6 带思考时,大文档的一次调用实测到过约 210s,超时被中止会白跑一轮(那次拿不到用量,服务端却可能照样计费)"
+    description: "单次模型调用的客户端超时(毫秒),对所有阶段生效。留空 = 按阶段默认:plan / draft / sync / translate / qa 300000(glm-4.6 带思考时大文档一次调用实测约 210s),revise 600000(返工一次要给出整节搬家 + 多处改号的 edits,300s 实测不够)"
     required: false
-    default: "300000"
+    default: ""
+  llm-timeout-ms-plan:
+    description: "只覆盖 plan 阶段的单次超时(毫秒);留空 = 用 llm-timeout-ms 或阶段默认"
+    required: false
+    default: ""
+  llm-timeout-ms-draft:
+    description: "只覆盖 draft 阶段的单次超时(毫秒);留空 = 用 llm-timeout-ms 或阶段默认"
+    required: false
+    default: ""
+  llm-timeout-ms-revise:
+    description: "只覆盖 revise 阶段的单次超时(毫秒);留空 = 用 llm-timeout-ms 或阶段默认 600000"
+    required: false
+    default: ""
+  llm-timeout-total-ms:
+    description: "一次模型调用因超时被中止后的总时长上限(毫秒),默认 900000。超时不做同参数重试(必然再超时),只允许换翻倍的超时再试一次,且「已耗时 + 下次超时」不得超过这个上限;revise 逐条退化处理也用它当总预算"
+    required: false
+    default: "900000"
   translate-chunk-chars:
     description: "整篇翻译的分块大小(源文档字符数),按 Markdown 标题切块逐块翻译再拼接;默认 4000,配合 4096 的输出上限有余量"
     required: false
@@ -98,6 +114,10 @@ runs:
         LLM_RETRY_MAX_WAIT_MS: ${{ inputs.llm-retry-max-wait-ms }}
         LLM_MAX_TOKENS: ${{ inputs.llm-max-tokens }}
         LLM_TIMEOUT_MS: ${{ inputs.llm-timeout-ms }}
+        LLM_TIMEOUT_MS_PLAN: ${{ inputs.llm-timeout-ms-plan }}
+        LLM_TIMEOUT_MS_DRAFT: ${{ inputs.llm-timeout-ms-draft }}
+        LLM_TIMEOUT_MS_REVISE: ${{ inputs.llm-timeout-ms-revise }}
+        LLM_TIMEOUT_TOTAL_MS: ${{ inputs.llm-timeout-total-ms }}
         TRANSLATE_CHUNK_CHARS: ${{ inputs.translate-chunk-chars }}
         CODE_PATHS: ${{ inputs.code-paths }}
         DOCS_SOURCE_DIR: ${{ inputs.docs-source-dir }}

@@ -1,6 +1,6 @@
 // 调用国内大模型(OpenAI 兼容接口)。改 LLM_BASE_URL/LLM_MODEL 即可在
 // GLM(智谱)、DeepSeek、Kimi(Moonshot)之间切换,无需改其它代码。
-import { TruncatedError } from "./errors.mjs";
+import { TruncatedError, TimeoutError } from "./errors.mjs";
 
 const BASE_URL = process.env.LLM_BASE_URL || "https://api.deepseek.com/v1";
 const MODEL = process.env.LLM_MODEL || "deepseek-chat";
@@ -26,15 +26,37 @@ export function modelFor(stage) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ── 单次请求超时 ──
+// ── 单次请求超时(分阶段)──
 // 默认 300s:glm-4.6 带思考时,大文档的一次 draft / sync 实测到过约 210s(Apollo 回放 #5655);
 // 旧的 120s 会在服务端还在生成时把连接掐掉,白跑一轮(那一次的 token 拿不到,服务端却可能照样计费)。
-// 每次调用时读环境变量(空串 / 非法值回落默认),LLM_TIMEOUT_MS 由 action 的 llm-timeout-ms 输入项传入。
+// revise 单列 600s:#5655 的返工要「整节搬家 + 三处标题改号 + 补两段内容」,一次生成的 edits 比 draft 长得多,
+// 实测 300s 连撞三次都没出结果(运行 35483899676),而同文档的 draft 是 208.6s —— 取其 2 倍多一点、并留出思考的余量。
+// 取值顺序:LLM_TIMEOUT_MS_<STAGE>(分阶段覆盖)→ LLM_TIMEOUT_MS(统一覆盖)→ 本阶段内置默认。
+// 每次调用时读环境变量(空串 / 非法值回落下一级)。
 export const DEFAULT_TIMEOUT_MS = 300000;
-function requestTimeout() {
-  const n = Number(String(process.env.LLM_TIMEOUT_MS ?? "").trim());
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
+export const STAGE_TIMEOUT_MS = { revise: 600000 };
+const envMs = (v) => {
+  const n = Number(String(v ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+/** 某阶段单次调用的客户端超时(毫秒)。 */
+export function stageTimeout(stage = "") {
+  return (
+    envMs(process.env[`LLM_TIMEOUT_MS_${String(stage).toUpperCase()}`]) ||
+    envMs(process.env.LLM_TIMEOUT_MS) ||
+    STAGE_TIMEOUT_MS[stage] ||
+    DEFAULT_TIMEOUT_MS
+  );
 }
+
+// ── 超时后的总时长上限 ──
+// 超时不做同参数重试(必然再超时),只允许换更宽的超时(翻倍)再试一次,且「已耗时 + 下次超时」不得超过这个上限。
+// 默认 900s:与旧版最坏情况(3 × 300s)持平,但那 15 分钟从「三次注定失败的同参数重试」变成「一次 300s + 一次 600s」。
+// revise 默认 600s 时,翻倍后 600 + 1200 > 900 → 不再试,直接如实失败(由调用方退化成逐条处理,见 revise.mjs)。
+export const DEFAULT_TIMEOUT_TOTAL_MS = 900000;
+export const timeoutTotal = () => envMs(process.env.LLM_TIMEOUT_TOTAL_MS) || DEFAULT_TIMEOUT_TOTAL_MS;
+const TIMEOUT_MAX_ATTEMPTS = 2; // 原超时 1 次 + 翻倍超时 1 次
+const TIMEOUT_WIDEN_FACTOR = 2;
 
 // ── 重试与限流退避 ──
 // 可重试:网络异常 / 超时、429、5xx,以及把限流写在错误体里的业务码(智谱 1302 并发过高、1303 频率过高、1305 请求过多,
@@ -47,7 +69,9 @@ export const QUOTA_CODES = new Set(["1113", "1304", "1308"]);
 export const DEFAULT_RETRY_MAX_WAIT_MS = 180000;
 const RETRY_BASE_MS = 2000;
 const RETRY_CAP_MS = 60000;
-const NETWORK_MAX_ATTEMPTS = 3; // 网络异常 / 超时每次都可能耗满 TIMEOUT,次数单独封顶(= 历史行为)
+// 网络异常(连接重置 / DNS / 握手失败,秒级失败)单独封顶 3 次 —— 这类重试有收益,= 历史行为。
+// 超时中止不走这里:它按 TIMEOUT_MAX_ATTEMPTS 单独封顶,且只能换更宽的超时重试。
+const NETWORK_MAX_ATTEMPTS = 3;
 
 /** 第 attempt 次重试前的等待(毫秒):指数增长、封顶 60s,落在 [d/2, d] 的随机点上。 */
 export function backoffDelay(attempt, random = Math.random) {
@@ -199,7 +223,11 @@ export async function callLLM(
   };
   // 结束时(成功、抛错都算)记一条用量;截断时接口通常也给了 usage,照样记上。timeouts = 因超时被中止的尝试数
   const call = { stage, model, ok: false, usage: null, retries: 0, waitedMs: 0, timeouts: 0 };
-  const timeout = requestTimeout();
+  const who = `[llm] ${stage ? `${stage} · ` : ""}${model}`;
+  const totalCap = timeoutTotal();
+  let timeout = stageTimeout(stage); // 超时后重试要换更宽的值,所以是变量
+  let timedOutMs = 0; // 已经花在「跑满超时被中止」上的时间
+  const tried = []; // 每次超时中止的实际超时值,用于失败信息
   try {
     for (let attempt = 1; ; attempt++) {
       call.retries = attempt - 1;
@@ -214,10 +242,21 @@ export async function callLLM(
         // 被中止的那次拿不到 usage(服务端可能照样计费),如实写「中止,无用量」。
         if (ctrl.signal.aborted) {
           call.timeouts++;
-          log(
-            `[llm] ${stage ? `${stage} · ` : ""}${model}:第 ${attempt} 次尝试超过 ${secs(timeout)} 被中止(中止,无用量);` +
-              `见 LLM_TIMEOUT_MS`
-          );
+          tried.push(timeout);
+          timedOutMs += timeout;
+          log(`${who}:第 ${attempt} 次尝试超过 ${secs(timeout)} 被中止(中止,无用量);见 LLM_TIMEOUT_MS`);
+          // 同参数重试必然再次超时(#5655 返工烧掉 3 × 300s 就是这么来的):要么换更宽的超时再试一次,要么如实失败。
+          const wider = timeout * TIMEOUT_WIDEN_FACTOR;
+          if (call.timeouts >= TIMEOUT_MAX_ATTEMPTS || timedOutMs + wider > totalCap)
+            throw new TimeoutError(
+              `模型调用超时:${stage ? `${stage} 阶段 ` : ""}${model} 已尝试 ${call.timeouts} 次` +
+                `(每次超时上限依次为 ${tried.map(secs).join("、")},累计 ${secs(timedOutMs)};总时长上限 ${secs(totalCap)})。` +
+                `超时不做同参数重试(必然再次超时)。建议:调大 llm-timeout-ms-${stage || "<阶段>"}(或 llm-timeout-ms / llm-timeout-total-ms),` +
+                `或把单次任务拆小(减少一次处理的意见条数,让模型分多条小 edits 输出)。`
+            );
+          timeout = wider;
+          log(`${who}:超时不原样重试,改用 ${secs(timeout)} 的超时再试一次(总时长上限 ${secs(totalCap)})`);
+          continue;
         }
         if (++networkFailures >= NETWORK_MAX_ATTEMPTS || !(await backoff(attempt))) throw e;
         continue;
