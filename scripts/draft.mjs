@@ -15,7 +15,7 @@ import { loadConfig, isSourceDoc, checkNewDocPath } from "./config.mjs";
 import { resolveDiffRange, describeRange, codeChangedFiles, diffFilesFor } from "./diff.mjs";
 import { buildDiffText } from "./budget.mjs";
 import { classifyError } from "./errors.mjs";
-import { reportCommentFailure, stepSummary } from "./planlib.mjs";
+import { reportCommentFailure, reportSoftFailure, stepSummary } from "./planlib.mjs";
 import { commitPaths, pushWithRebase } from "./git.mjs";
 
 const { GITHUB_REPOSITORY, ISSUE_NUMBER, ISSUE_BODY } = process.env;
@@ -128,16 +128,21 @@ Source: #${prNum} · Closes #${ISSUE_NUMBER}`;
     `gh pr create --base ${base} --head ${branch} --title "${docTitle}" --label docs/draft --body-file "${tmp("pr.md")}"`
   ).trim();
 
-  // 文档审核(拼写/坏链):提示性贴评论,不阻断
+  // 文档审核(拼写/坏链):只查本次改动的文档,提示性贴评论、不阻断;失败也要看得见(日志 + Step Summary)
   const docPr = (out.match(/\/pull\/(\d+)/) || [])[1];
-  if (docPr) await runCheck(docPr).catch(() => {});
+  const changedDocs = [...editedPaths, ...enPairs.map((p) => p.target)];
+  if (docPr)
+    await runCheck(docPr, changedDocs).catch((e) => reportSoftFailure({ task: "文档审核", err: e }));
 
-  // 译文质检(LLM-as-judge):准确性/连贯性/翻译腔,提示性贴评论
+  // 译文质检(LLM-as-judge):准确性/连贯性/翻译腔,提示性贴评论。
+  // 失败不许吞掉(v1.2.1 把异常吞成 null,Apollo 回放里的质检失败一声不响):日志、Step Summary 与 PR 回帖都写明原因类别
   if (docPr && enPairs.length) {
-    const report = await qaTranslation(enPairs).catch(() => null);
-    if (report) {
+    try {
+      const report = await qaTranslation(enPairs);
       writeFileSync(tmp("qa.md"), `🌐 **译文质检**(提示性)\n\n${report}`);
       sh(`gh pr comment ${docPr} --body-file "${tmp("qa.md")}"`);
+    } catch (e) {
+      reportSoftFailure({ task: "译文质检", err: e, pr: docPr, file: tmp("qa-fail.md") });
     }
   }
 } catch (e) {

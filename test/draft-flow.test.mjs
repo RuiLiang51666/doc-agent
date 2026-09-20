@@ -29,6 +29,9 @@ before(async () => {
         usage: usage(1000, 50),
       };
     if (body.model === "translate-x") return { content: "# Expiration\n\nSet a TTL with `setTtl(ms)`." };
+    // 质检报告被输出上限截断(Apollo 回放里的真实情形:恰好 1024 token)
+    if (body.model === "qa-truncated-x")
+      return { content: "- **[Minor] 风格·翻译腔** — ", finish: "length", usage: usage(12921, 1024) };
     return { content: "译文质检:通过", usage: usage(2000, 100) };
   });
 });
@@ -134,6 +137,9 @@ test("draft:计划含新建文档 → 新建中文文档与新生成的英文译
   assert.equal(gitIn(ctx.repo, "status", "--porcelain"), ""); // 没有漏在工作区里的新文件
   assert.match(r.gh, /pr create --base main --head docs\/plan-12/);
   assert.match(r.gh, /`docs\/zh\/guide\/ttl\.md`\(新建\) — 新建过期策略文档/);
+  // 文档审核只查本次改动的 4 个文档(中文 2 篇 + 同步出的英文 2 篇),不再扫全仓
+  assert.match(r.gh, /pr comment 13 --body-file \S+\n📋 文档审核通过 ✅[^\n]*范围:本次改动的 4 个文档/);
+  assert.match(r.stdout, /文档审核:只查本次改动的 4 个文档/);
 });
 
 test("draft:模型要在源文档目录外新建 → 拒绝落盘,计划 Issue 下回帖「模型输出校验失败」,不推送、不建 PR", async () => {
@@ -163,6 +169,24 @@ test("draft:失败回帖被拒(HTTP 403)→ 不静默:日志与 Step Summary 写
   const hint = "无法在 Issue #12 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 issues: write 权限";
   assert.ok(r.stderr.includes(hint), r.stderr);
   assert.ok(readLog(summary).includes(`(本次失败原因类别:**模型输出校验失败**)——${hint}`));
+});
+
+test("draft:译文质检失败 → 不吞掉:PR 下回帖「译文质检未完成」+ 日志 + Step Summary,运行仍判成功", async () => {
+  const ctx = setup();
+  draftReply = {
+    edits: [{ path: "docs/zh/cache.md", old_string: "读取。", new_string: "读取。支持 TTL。" }],
+  };
+  const summary = join(ctx.root, "summary.md");
+  const r = await runDraft(ctx, { GITHUB_STEP_SUMMARY: summary, LLM_MODEL_QA: "qa-truncated-x" });
+  assert.equal(r.code, 0, r.stderr); // 质检是提示性的,失败不改变运行结论
+  assert.match(r.gh, /pr create --base main --head docs\/plan-12/);
+  assert.match(
+    r.gh,
+    /pr comment 13 --body-file \S+\n⚠️ 译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)/
+  );
+  assert.doesNotMatch(r.gh, /🌐 \*\*译文质检\*\*/); // 没有半截报告冒充成功
+  assert.match(r.stderr, /⚠️ 译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)/);
+  assert.match(readLog(summary), /> ⚠️ 译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)——详见 Actions 日志。/);
 });
 
 test("draft:本阶段全部模型调用(初稿 + 译文同步 + 整篇翻译 + 译文质检)逐次打日志,合计按模型写进 Step Summary", async () => {

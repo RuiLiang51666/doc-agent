@@ -95,7 +95,8 @@ export function loadConfig(env = process.env) {
 /** 是否为配置的代码路径(plan 只评估这些文件的改动)。 */
 export const isCodePath = (path, cfg) => matchPaths(path, cfg.codePaths);
 
-const isDocFile = (path, cfg) => cfg.docsGlobs.some((g) => globToRegExp(g).test(basename(path)));
+/** 文件名是否命中 docs-glob(拼写 / 坏链检查按它过滤本次改动的文件)。 */
+export const isDocFile = (path, cfg) => cfg.docsGlobs.some((g) => globToRegExp(g).test(basename(path)));
 
 /**
  * 是否为源语言文档(canonical):在源目录下、不在译文目录下(KWDB 式「根目录 → en/」时靠这条排除 en/)、

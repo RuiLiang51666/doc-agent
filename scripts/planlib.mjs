@@ -10,7 +10,8 @@ import { trackedFiles, diffFilesFor } from "./diff.mjs";
 import { buildPlanPrompt } from "./prefilter.mjs";
 
 // 异常分类挪到 errors.mjs(draft / revise / translate 也要用);这里转出,原有引用路径照常可用
-export { classifyError } from "./errors.mjs";
+import { classifyError } from "./errors.mjs";
+export { classifyError };
 
 /**
  * 在计划 Issue 列表里找同一源 PR 的那个:有契约就只认契约里的 sourcePr;
@@ -86,6 +87,34 @@ export function commentOnPr({ repo, pr, body, file, kind, context, run = sh, env
     reportCommentFailure({ target: `PR #${pr}`, permission: "pull-requests: write", err, kind, context, env });
     return false;
   }
+}
+
+/**
+ * 提示性步骤(文档审核、译文质检)失败时调用:结论可以仍判成功,但失败必须看得见,绝不把异常吞掉。
+ * 日志 + Step Summary 写明「<任务>未完成(原因类别:X)」与错误信息;给了 pr / file 就在该 PR 下回帖同样一句
+ * (回帖再被拒也只走 reportCommentFailure,不影响运行结论)。返回原因类别。
+ */
+export function reportSoftFailure({ task, err, pr, file, run = sh, env = process.env }) {
+  const kind = classifyError(err);
+  const head = `⚠️ ${task}未完成(原因类别:**${kind.label}**)`;
+  const body = `${head}\n\n\`\`\`\n${String((err && err.message) || err).slice(0, 500)}\n\`\`\``;
+  console.error(body);
+  stepSummary(`> ${head}——详见 Actions 日志。`, env);
+  if (pr && file) {
+    try {
+      writeFileSync(file, `${body}\n\n(提示性步骤,不阻断合并)`);
+      run(`gh pr comment ${pr} --body-file "${file}"`);
+    } catch (err2) {
+      reportCommentFailure({
+        target: `PR #${pr}`,
+        permission: "pull-requests: write",
+        err: err2,
+        context: `${task}未完成`,
+        env,
+      });
+    }
+  }
+  return kind;
 }
 
 /** 本次 Actions 运行的链接;server 形态没有 GITHUB_RUN_ID,返回 ""。 */

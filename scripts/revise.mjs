@@ -16,7 +16,7 @@ import { sh, shRead } from "./sh.mjs";
 import { ghList } from "./gh.mjs";
 import { loadConfig, isSourceDoc } from "./config.mjs";
 import { classifyError } from "./errors.mjs";
-import { reportCommentFailure } from "./planlib.mjs";
+import { reportCommentFailure, reportSoftFailure } from "./planlib.mjs";
 import { commitPaths, currentBranch, pushWithRebase } from "./git.mjs";
 import { pendingThreads, reviseUser, REPLY_MARK } from "./review.mjs";
 
@@ -107,15 +107,19 @@ try {
     console.error(`标记 review 线程已解决失败(不影响返工结果):${e.message}`);
   }
 
-  // 改完顺手跑文档审核(拼写/坏链),提示性贴评论
-  await runCheck(PR_NUMBER).catch(() => {});
+  // 改完顺手跑文档审核(拼写/坏链):只查本次改到的文档,提示性贴评论;失败也要看得见
+  await runCheck(PR_NUMBER, [...edited, ...synced.map((s) => s.target)]).catch((e) =>
+    reportSoftFailure({ task: "文档审核", err: e })
+  );
 
-  // 若同步了译文,跑译文质检
+  // 若同步了译文,跑译文质检。失败不许吞掉:日志、Step Summary 与 PR 回帖都写明原因类别(运行结论仍判成功)
   if (synced.length) {
-    const report = await qaTranslation(synced).catch(() => null);
-    if (report) {
+    try {
+      const report = await qaTranslation(synced);
       writeFileSync(tmp("qa.md"), `🌐 **译文质检**(提示性)\n\n${report}`);
       sh(`gh pr comment ${PR_NUMBER} --body-file "${tmp("qa.md")}"`);
+    } catch (e) {
+      reportSoftFailure({ task: "译文质检", err: e, pr: PR_NUMBER, file: tmp("qa-fail.md") });
     }
   }
 } catch (e) {

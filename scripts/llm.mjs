@@ -25,7 +25,16 @@ export function modelFor(stage) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const TIMEOUT = Number(process.env.LLM_TIMEOUT_MS) || 120000; // 每次请求超时,默认 120s
+
+// ── 单次请求超时 ──
+// 默认 300s:glm-4.6 带思考时,大文档的一次 draft / sync 实测到过约 210s(Apollo 回放 #5655);
+// 旧的 120s 会在服务端还在生成时把连接掐掉,白跑一轮(那一次的 token 拿不到,服务端却可能照样计费)。
+// 每次调用时读环境变量(空串 / 非法值回落默认),LLM_TIMEOUT_MS 由 action 的 llm-timeout-ms 输入项传入。
+export const DEFAULT_TIMEOUT_MS = 300000;
+function requestTimeout() {
+  const n = Number(String(process.env.LLM_TIMEOUT_MS ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
+}
 
 // ── 重试与限流退避 ──
 // 可重试:网络异常 / 超时、429、5xx,以及把限流写在错误体里的业务码(智谱 1302 并发过高、1303 频率过高、1305 请求过多,
@@ -90,7 +99,8 @@ function readCompletion(json) {
 }
 
 // ── 用量与重试记录 ──
-// 每次调用结束(成功或失败)记一条并打一行日志:token 用量取接口返回的 usage(没有就写「接口未返回」)、重试次数、累计等待。
+// 每次调用结束(成功或失败)记一条并打一行日志:token 用量取接口返回的 usage(没有就写「接口未返回」)、重试次数、累计等待、
+// 因超时被中止的次数(被中止的那次拿不到 usage,如实写「中止,无用量」)。
 // 进程内累积(一次 plan / draft 运行 = 一个进程),阶段脚本退出时用 usageSummary 汇总写进 Step Summary,供核算成本。
 export const llmCalls = [];
 const secs = (ms) => `${Math.round(ms / 100) / 10}s`;
@@ -109,7 +119,9 @@ export function formatCall(c) {
   const u = c.usage
     ? `输入 ${c.usage.prompt} / 输出 ${c.usage.completion} / 合计 ${c.usage.total}`
     : "接口未返回";
-  return `[llm] ${c.stage ? `${c.stage} · ` : ""}${c.model}${c.ok ? "" : " 调用失败"}:token 用量 ${u};重试 ${c.retries} 次,累计等待 ${secs(c.waitedMs)}`;
+  // 超时中止过就写明次数:那几次尝试的 token 接口没返回,如实写「中止,无用量」,免得把用量当成全部开销
+  const aborted = c.timeouts ? `;超时中止 ${c.timeouts} 次(中止,无用量)` : "";
+  return `[llm] ${c.stage ? `${c.stage} · ` : ""}${c.model}${c.ok ? "" : " 调用失败"}:token 用量 ${u};重试 ${c.retries} 次,累计等待 ${secs(c.waitedMs)}${aborted}`;
 }
 
 /** 本进程(本阶段)全部调用的合计,按模型分行的 Markdown;没调用过模型返回 ""。 */
@@ -130,28 +142,34 @@ export function usageSummary(calls, title) {
   for (const c of calls) add("**合计**", c);
   const failed = calls.filter((c) => !c.ok).length;
   const missing = calls.filter((c) => !c.usage).length;
-  const notes = [failed && `${failed} 次调用失败`, missing && `${missing} 次接口未返回 usage(token 数未计入这几次)`];
+  const timeouts = calls.reduce((s, c) => s + (c.timeouts || 0), 0);
+  const notes = [
+    failed && `${failed} 次调用失败`,
+    missing && `${missing} 次接口未返回 usage(token 数未计入这几次)`,
+    timeouts && `${timeouts} 次尝试因超时被中止(中止,无用量;已计入重试次数)`,
+  ];
   return [
     `**doc-agent 模型用量(${title} 阶段合计)**`,
     "",
     "| 模型 | 调用次数 | 输入 token | 输出 token | 合计 token | 重试次数 | 累计等待 |",
     "|---|---|---|---|---|---|---|",
     ...[...rows].map(([k, r]) => `| ${k} | ${r.n} | ${r.prompt} | ${r.completion} | ${r.total} | ${r.retries} | ${secs(r.waitedMs)} |`),
-    ...(failed || missing ? ["", `其中 ${notes.filter(Boolean).join(";")}。`] : []),
+    ...(failed || missing || timeouts ? ["", `其中 ${notes.filter(Boolean).join(";")}。`] : []),
   ].join("\n");
 }
 
 /**
  * 调一次 chat/completions,重试策略见上。wait / random / log 可注入(测试里不真等、收日志);stage 只用于日志与汇总。
- * 设了 LLM_MAX_TOKENS 才带 max_tokens,不设沿用接口默认。
+ * 输出上限:调用方显式传 maxTokens 优先(整篇翻译、译文质检这类长输出必须显式设,不能听凭接口默认——
+ * 实测 glm-4-flash 的默认上限只有 1024 token,25KB 文档必被截断);否则用 LLM_MAX_TOKENS,再不设才沿用接口默认。
  */
 export async function callLLM(
   system,
   user,
   model = MODEL,
-  { wait = sleep, random = Math.random, log = console.log, stage = "" } = {}
+  { wait = sleep, random = Math.random, log = console.log, stage = "", maxTokens: explicitMaxTokens = 0 } = {}
 ) {
-  const maxTokens = Number(process.env.LLM_MAX_TOKENS) || 0;
+  const maxTokens = Number(explicitMaxTokens) || Number(process.env.LLM_MAX_TOKENS) || 0;
   const opts = {
     method: "POST",
     headers: {
@@ -179,18 +197,28 @@ export async function callLLM(
     await wait(d);
     return true;
   };
-  // 结束时(成功、抛错都算)记一条用量;截断时接口通常也给了 usage,照样记上
-  const call = { stage, model, ok: false, usage: null, retries: 0, waitedMs: 0 };
+  // 结束时(成功、抛错都算)记一条用量;截断时接口通常也给了 usage,照样记上。timeouts = 因超时被中止的尝试数
+  const call = { stage, model, ok: false, usage: null, retries: 0, waitedMs: 0, timeouts: 0 };
+  const timeout = requestTimeout();
   try {
     for (let attempt = 1; ; attempt++) {
       call.retries = attempt - 1;
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), TIMEOUT); // 挂住就中止,避免无限等
+      const timer = setTimeout(() => ctrl.abort(), timeout); // 挂住就中止,避免无限等
       let res;
       try {
         res = await fetch(`${BASE_URL}/chat/completions`, { ...opts, signal: ctrl.signal });
       } catch (e) {
         clearTimeout(timer);
+        // 超时中止不许悄悄消失:当场打一行日志,并计进本次调用的 timeouts(重试次数由 call.retries 记)。
+        // 被中止的那次拿不到 usage(服务端可能照样计费),如实写「中止,无用量」。
+        if (ctrl.signal.aborted) {
+          call.timeouts++;
+          log(
+            `[llm] ${stage ? `${stage} · ` : ""}${model}:第 ${attempt} 次尝试超过 ${secs(timeout)} 被中止(中止,无用量);` +
+              `见 LLM_TIMEOUT_MS`
+          );
+        }
         if (++networkFailures >= NETWORK_MAX_ATTEMPTS || !(await backoff(attempt))) throw e;
         continue;
       }
@@ -301,10 +329,11 @@ const STAGE_SHAPE = {
 /**
  * 一个阶段一把收:选模型(modelFor)→ 调模型(callLLM)→ 按 STAGE_SHAPE 解析校验(parseStage)。
  * 各阶段脚本因此瘦成「构造输入 → runStage → 应用输出」。
+ * maxTokens:本次调用的输出上限,长输出阶段(整篇翻译、译文质检)显式传,不传沿用 LLM_MAX_TOKENS / 接口默认。
  * @returns 有 shape 的阶段返回校验后的对象;无 shape 的返回模型原始文本。
  */
-export async function runStage({ stage, system, user }) {
-  const raw = await callLLM(system, user, modelFor(stage), { stage });
+export async function runStage({ stage, system, user, maxTokens = 0 }) {
+  const raw = await callLLM(system, user, modelFor(stage), { stage, maxTokens });
   const shape = STAGE_SHAPE[stage];
   return shape ? parseStage(raw, shape) : raw;
 }

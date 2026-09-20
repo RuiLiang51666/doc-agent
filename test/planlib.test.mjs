@@ -13,6 +13,7 @@ import {
   stepSummary,
   normalizePlanItems,
   reportCommentFailure,
+  reportSoftFailure,
   commentOnPr,
   noUpdateComment,
   hasNoUpdateComment,
@@ -92,6 +93,65 @@ test("stepSummary:有 GITHUB_STEP_SUMMARY 就追加写入,没有(server 形态)�
   assert.equal(stepSummary("第二行", { GITHUB_STEP_SUMMARY: file }), true);
   assert.equal(readFileSync(file, "utf8"), "第一行\n\n第二行\n\n");
   assert.equal(stepSummary("x", {}), false);
+});
+
+test("reportSoftFailure:提示性步骤失败 → 日志 + Step Summary + PR 回帖写明原因类别(不抛,不改变运行结论)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "doc-agent-soft-"));
+  const summary = join(dir, "summary.md");
+  const body = join(dir, "qa-fail.md");
+  const cmds = [];
+  const logged = [];
+  const orig = console.error;
+  console.error = (m) => logged.push(String(m));
+  try {
+    const kind = reportSoftFailure({
+      task: "译文质检",
+      err: new TruncatedError("模型输出被截断(finish_reason=length,已输出 1024 字符)"),
+      pr: "4",
+      file: body,
+      run: (c) => cmds.push(c),
+      env: { GITHUB_STEP_SUMMARY: summary },
+    });
+    assert.equal(kind.label, "模型输出被截断");
+    assert.match(logged[0], /^⚠️ 译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)/);
+    assert.match(logged[0], /已输出 1024 字符/); // 错误原文也留下了
+    assert.deepEqual(cmds, [`gh pr comment 4 --body-file "${body}"`]);
+    assert.match(readFileSync(body, "utf8"), /⚠️ 译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)[\s\S]*提示性步骤,不阻断合并/);
+    assert.equal(
+      readFileSync(summary, "utf8"),
+      "> ⚠️ 译文质检未完成(原因类别:**模型输出被截断**)——详见 Actions 日志。\n\n"
+    );
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("reportSoftFailure:不给 pr / file 只写日志与 Step Summary;回帖再被拒也只提示权限,不抛", () => {
+  const summary = join(mkdtempSync(join(tmpdir(), "doc-agent-soft2-")), "summary.md");
+  const logged = [];
+  const orig = console.error;
+  console.error = (m) => logged.push(String(m));
+  try {
+    reportSoftFailure({ task: "文档审核", err: new Error("npx 退出码 1"), env: { GITHUB_STEP_SUMMARY: summary } });
+    assert.match(readFileSync(summary, "utf8"), /> ⚠️ 文档审核未完成\(原因类别:\*\*其他异常\*\*\)/);
+
+    reportSoftFailure({
+      task: "译文质检",
+      err: new Error("x"),
+      pr: "4",
+      file: join(mkdtempSync(join(tmpdir(), "doc-agent-soft3-")), "qa.md"),
+      run: () => {
+        const e = new Error("failed");
+        e.stderr = "gh: Resource not accessible by integration (HTTP 403)\n";
+        throw e;
+      },
+      env: { GITHUB_STEP_SUMMARY: summary },
+    });
+    assert.match(logged.at(-1), /无法在 PR #4 下回帖:Resource not accessible by integration \(HTTP 403\),请检查 workflow 的 pull-requests: write 权限/);
+    assert.match(readFileSync(summary, "utf8"), /\(译文质检未完成\)——无法在 PR #4 下回帖/);
+  } finally {
+    console.error = orig;
+  }
 });
 
 test("reportCommentFailure:回帖 403 → 日志打出位置 + gh 原因 + 权限提示,并连同原因类别写进 Step Summary", () => {

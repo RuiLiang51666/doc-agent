@@ -67,7 +67,7 @@ function envFor(p, token, tmp) {
   return {
     // 继承后端进程的环境变量:路径 / 语言 / 预算配置与 action inputs 同名(CODE_PATHS、DOCS_SOURCE_DIR、
     // DOCS_TARGET_DIR、DOCS_GLOB、DOCS_EXCLUDE、SOURCE_LANG、PLAN_TOKEN_BUDGET、DIFF_TOKEN_BUDGET、
-    // LLM_RETRY_MAX_WAIT_MS、LLM_MAX_TOKENS),由此传给脚本
+    // LLM_RETRY_MAX_WAIT_MS、LLM_MAX_TOKENS、LLM_TIMEOUT_MS、TRANSLATE_CHUNK_CHARS),由此传给脚本
     ...process.env,
     GH_TOKEN: token,
     LLM_API_KEY,

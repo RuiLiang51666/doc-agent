@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 process.env.LLM_API_KEY = "test-key";
-const { callLLM, backoffDelay, llmCalls, usageSummary } = await import("../scripts/llm.mjs");
+const { callLLM, backoffDelay, llmCalls, usageSummary, DEFAULT_TIMEOUT_MS } = await import("../scripts/llm.mjs");
 const { classifyError } = await import("../scripts/errors.mjs");
 
 // 按顺序回放响应({ ok, content, finish, usage } 或 { status, body, retryAfter } 或 { throws });记录每次请求体
@@ -120,7 +120,7 @@ test("callLLM 用量:接口返回 usage → 日志写明输入 / 输出 / 合计
   assert.equal(await callLLM("s", "u", "glm-4.6", { ...opts, stage: "plan" }), "ok");
   assert.deepEqual(logs, ["[llm] plan · glm-4.6:token 用量 输入 58934 / 输出 120 / 合计 59054;重试 0 次,累计等待 0s"]);
   assert.deepEqual(llmCalls.slice(before), [
-    { stage: "plan", model: "glm-4.6", ok: true, usage: { prompt: 58934, completion: 120, total: 59054 }, retries: 0, waitedMs: 0 },
+    { stage: "plan", model: "glm-4.6", ok: true, usage: { prompt: 58934, completion: 120, total: 59054 }, retries: 0, waitedMs: 0, timeouts: 0 },
   ]);
 });
 
@@ -150,6 +150,36 @@ test("callLLM 用量:限流重试 2 次后成功 → 日志写明重试次数与
   delete process.env.LLM_RETRY_MAX_WAIT_MS;
 });
 
+test("callLLM 超时:默认 300s、可用 LLM_TIMEOUT_MS 配置;被中止的尝试计进重试并打日志(中止,无用量)", async () => {
+  assert.equal(DEFAULT_TIMEOUT_MS, 300000); // 覆盖实测到过的约 210s 单次耗时
+  process.env.LLM_TIMEOUT_MS = "50"; // 每次调用时读,模块加载后改照样生效
+  // 服务端挂住不回:只有超时中止才让这次尝试结束
+  global.fetch = (_url, opts) =>
+    new Promise((_r, reject) =>
+      opts.signal.addEventListener("abort", () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" })))
+    );
+  const { logs, opts } = recorder();
+  await assert.rejects(() => callLLM("s", "u", "glm-4.6", { ...opts, stage: "sync" }), /aborted/);
+
+  const aborts = logs.filter((l) => /被中止\(中止,无用量\)/.test(l));
+  assert.equal(aborts.length, 3); // 网络类失败封顶 3 次尝试,每次都写一行
+  assert.match(aborts[0], /^\[llm\] sync · glm-4\.6:第 1 次尝试超过 0\.1s 被中止\(中止,无用量\);见 LLM_TIMEOUT_MS$/);
+  assert.match(logs.at(-1), /^\[llm\] sync · glm-4\.6 调用失败:token 用量 接口未返回;重试 2 次,累计等待 4\.5s;超时中止 3 次\(中止,无用量\)$/);
+  assert.equal(llmCalls.at(-1).timeouts, 3);
+  assert.equal(llmCalls.at(-1).retries, 2);
+  delete process.env.LLM_TIMEOUT_MS;
+});
+
+test("callLLM:调用方显式传 maxTokens 优先于 LLM_MAX_TOKENS(长输出阶段不听凭接口默认)", async () => {
+  process.env.LLM_MAX_TOKENS = "512";
+  const calls = scripted([{ ok: true, content: "ok" }, { ok: true, content: "ok" }]);
+  await callLLM("s", "u", "m", { ...recorder().opts, maxTokens: 4096 });
+  assert.equal(calls[0].max_tokens, 4096);
+  await callLLM("s", "u", "m", recorder().opts); // 不传就沿用环境变量
+  assert.equal(calls[1].max_tokens, 512);
+  delete process.env.LLM_MAX_TOKENS;
+});
+
 test("usageSummary:按模型分行 + 合计行;有失败 / 未返回 usage 的调用时加注;没调用过模型返回空串", () => {
   assert.equal(usageSummary([], "plan"), "");
   const u = (prompt, completion) => ({ prompt, completion, total: prompt + completion });
@@ -158,7 +188,7 @@ test("usageSummary:按模型分行 + 合计行;有失败 / 未返回 usage 的�
       { stage: "draft", model: "glm-4.6", ok: true, usage: u(30000, 800), retries: 1, waitedMs: 1500 },
       { stage: "sync", model: "glm-4.6", ok: true, usage: u(9000, 300), retries: 0, waitedMs: 0 },
       { stage: "qa", model: "glm-4-flash", ok: true, usage: null, retries: 0, waitedMs: 0 },
-      { stage: "translate", model: "glm-4-flash", ok: false, usage: null, retries: 2, waitedMs: 4500 },
+      { stage: "translate", model: "glm-4-flash", ok: false, usage: null, retries: 2, waitedMs: 4500, timeouts: 2 },
     ],
     "draft"
   );
@@ -173,7 +203,7 @@ test("usageSummary:按模型分行 + 合计行;有失败 / 未返回 usage 的�
       "| glm-4-flash | 2 | 0 | 0 | 0 | 2 | 4.5s |",
       "| **合计** | 4 | 39000 | 1100 | 40100 | 3 | 6s |",
       "",
-      "其中 1 次调用失败;2 次接口未返回 usage(token 数未计入这几次)。",
+      "其中 1 次调用失败;2 次接口未返回 usage(token 数未计入这几次);2 次尝试因超时被中止(中止,无用量;已计入重试次数)。",
     ].join("\n")
   );
 });

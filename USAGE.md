@@ -42,7 +42,7 @@
 ### A. GitHub Actions(目标仓库放一个瘦 workflow)
 
 把下面这个放到目标仓库 `.github/workflows/doc-agent.yml`(`OWNER` 换成 doc-agent 仓库所有者),
-配好 `LLM_API_KEY` secret、建两个 label 即可。逻辑全在 `doc-agent@v1.2.1`,升级只需 bump tag。
+配好 `LLM_API_KEY` secret、建两个 label 即可。逻辑全在 `doc-agent@v1.2.2`,升级只需 bump tag。
 `concurrency` 让同一 PR / Issue 的运行串行;老的 `pull_request_review_comment` 触发仍兼容,迁移说明见 README。
 三个 job 的 `permissions` 照抄即可:plan 也要 `pull-requests: write`,否则失败时在代码 PR 下回帖会被 GitHub 以 403 拒绝。
 
@@ -58,19 +58,19 @@ jobs:
     runs-on: ubuntu-latest
     concurrency: { group: "doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}", cancel-in-progress: false }
     permissions: { contents: read, issues: write, pull-requests: write }
-    steps: [{ uses: OWNER/doc-agent@v1.2.1, with: { mode: plan, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
+    steps: [{ uses: OWNER/doc-agent@v1.2.2, with: { mode: plan, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
   draft:
     if: github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'docs/plan') && startsWith(github.event.comment.body, '/approve') && github.event.comment.user.type != 'Bot'
     runs-on: ubuntu-latest
     concurrency: { group: "doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}", cancel-in-progress: false }
     permissions: { contents: write, issues: write, pull-requests: write }
-    steps: [{ uses: OWNER/doc-agent@v1.2.1, with: { mode: draft, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
+    steps: [{ uses: OWNER/doc-agent@v1.2.2, with: { mode: draft, github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
   revise:
     if: github.event_name == 'pull_request_review' && contains(github.event.pull_request.labels.*.name, 'docs/draft') && github.event.review.user.type != 'Bot'
     runs-on: ubuntu-latest
     concurrency: { group: "doc-agent-${{ github.event.pull_request.number || github.event.issue.number }}", cancel-in-progress: false }
     permissions: { contents: write, pull-requests: write }
-    steps: [{ uses: OWNER/doc-agent@v1.2.1, with: { mode: revise, ref: "${{ github.event.pull_request.head.ref }}", github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
+    steps: [{ uses: OWNER/doc-agent@v1.2.2, with: { mode: revise, ref: "${{ github.event.pull_request.head.ref }}", github-token: "${{ github.token }}", llm-api-key: "${{ secrets.LLM_API_KEY }}" } }]
 ```
 
 ### B. GitHub App + 后端(目标仓库零文件)
@@ -89,7 +89,9 @@ jobs:
 | `llm-fast-model` / `LLM_FAST_MODEL` | `glm-4-flash` | 整篇翻译、译文质检(重速度) |
 | `llm-base-url` / `LLM_BASE_URL` | 智谱地址 | 任意 OpenAI 兼容接口,可切 DeepSeek/Kimi |
 | `llm-retry-max-wait-ms` / `LLM_RETRY_MAX_WAIT_MS` | `180000` | 限流 / 5xx 退避重试的累计等待上限 |
-| `llm-max-tokens` / `LLM_MAX_TOKENS` | 空 | 模型单次输出上限;输出被截断时会明确失败,可调大 |
+| `llm-max-tokens` / `LLM_MAX_TOKENS` | 空 | 模型单次输出上限;整篇翻译与译文质检始终显式设(没配按 4096),输出被截断时会明确失败 |
+| `llm-timeout-ms` / `LLM_TIMEOUT_MS` | `300000` | 单次模型调用的客户端超时;大文档实测单次到过约 210s,超时中止会计进重试并写「中止,无用量」 |
+| `translate-chunk-chars` / `TRANSLATE_CHUNK_CHARS` | `4000` | 整篇翻译的分块大小(源文档字符数),按 Markdown 标题切块逐块翻译再拼接 |
 | 写作规范 | 内置 `prompts/style.md` | 目标仓库放 `.doc-agent/style.md` 即用自己的家规 |
 | 路径 / 语言 / 预算 | 历史行为 | `code-paths`、`docs-source-dir`、`docs-target-dir`、`docs-glob`、`docs-exclude`、`source-lang`、`plan-token-budget`、`diff-token-budget`,详见 README「配置」 |
 
@@ -101,7 +103,8 @@ jobs:
 - **生成失败**:机器人会在计划 Issue 下留言报错(带原因类别);修掉后重新 `/approve`(幂等,不会重复建 PR)即可重试。
 - **返工失败**:机器人在对应的 review 线程下回帖说明原因类别。该意见随即算作「已答复」,不会被后续运行反复重试——要重试,在那条线程下再回一条意见即可。
 - **模型限流(429 / 智谱 1302 等)**:自动指数退避 + 随机抖动重试,累计等待到 `llm-retry-max-wait-ms` 为止;仍不行就如实失败回帖。欠费、当日额度用尽这类不重试。
-- **输出被截断**:`finish_reason=length` 时按「模型输出被截断」失败,绝不把半截 JSON / 半截译文写进文档;可调大 `llm-max-tokens` 或换输出上限更大的模型后重试。
+- **输出被截断**:`finish_reason=length` 时按「模型输出被截断」失败,绝不把半截 JSON / 半截译文写进文档;可调大 `llm-max-tokens` 或换输出上限更大的模型后重试。整篇翻译已按标题分块(`translate-chunk-chars`),报错会写明是第几块。
+- **审核 / 质检没出评论**:它们是提示性步骤,失败不阻断运行,但不会被悄悄吞掉——译文质检失败会在文档 PR 下回帖「译文质检未完成(原因类别:…)」,文档审核失败写进日志与 Step Summary。
 - **推送冲突**:同一文档分支被别的运行先推了,机器人会 `git pull --rebase` 后重试(最多 3 次);改到同一段落而冲突时,回滚变基并如实回帖。
 - **网络瞬时抖动**:`gh` 读调用与推送会自动重试(EOF/超时等);开 Issue / PR / 评论这类写操作不重试,以免重复。
 - **文档 PR 冲突**:文档 PR 还没合并时,别的改动又落地了同一篇 → 当普通冲突解决(把主分支合进文档 PR 分支)。

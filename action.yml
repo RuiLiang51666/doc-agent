@@ -31,9 +31,17 @@ inputs:
     required: false
     default: "180000"
   llm-max-tokens:
-    description: "模型单次输出上限(max_tokens);留空 = 接口默认。输出被截断(finish_reason=length)时按「模型输出被截断」失败回帖,可调大此值"
+    description: "模型单次输出上限(max_tokens);留空 = 接口默认(整篇翻译与译文质检这两个长输出阶段例外,它们始终显式设上限,默认 4096)。输出被截断(finish_reason=length)时按「模型输出被截断」失败回帖,可调大此值"
     required: false
     default: ""
+  llm-timeout-ms:
+    description: "单次模型调用的客户端超时(毫秒)。默认 300000:glm-4.6 带思考时,大文档的一次调用实测到过约 210s,超时被中止会白跑一轮(那次拿不到用量,服务端却可能照样计费)"
+    required: false
+    default: "300000"
+  translate-chunk-chars:
+    description: "整篇翻译的分块大小(源文档字符数),按 Markdown 标题切块逐块翻译再拼接;默认 4000,配合 4096 的输出上限有余量"
+    required: false
+    default: "4000"
   # ── 路径与语言(默认 == 历史行为:代码 src、中文 docs/zh、英文 docs/en、*.md)──
   code-paths:
     description: "代码路径 glob,换行或逗号分隔;** 跨目录,! 或 :! 开头为排除(如 apollo-*/src/main/java 与 :!**/src/test/**)。只有这些文件的改动才触发文档评估"
@@ -89,6 +97,8 @@ runs:
         LLM_FAST_MODEL: ${{ inputs.llm-fast-model }}
         LLM_RETRY_MAX_WAIT_MS: ${{ inputs.llm-retry-max-wait-ms }}
         LLM_MAX_TOKENS: ${{ inputs.llm-max-tokens }}
+        LLM_TIMEOUT_MS: ${{ inputs.llm-timeout-ms }}
+        TRANSLATE_CHUNK_CHARS: ${{ inputs.translate-chunk-chars }}
         CODE_PATHS: ${{ inputs.code-paths }}
         DOCS_SOURCE_DIR: ${{ inputs.docs-source-dir }}
         DOCS_TARGET_DIR: ${{ inputs.docs-target-dir }}

@@ -40,6 +40,7 @@ before(async () => {
           ],
         }),
       };
+    if (body.model === "qa-truncated-x") return { content: "- **[Minor] ", finish: "length" };
     return { content: "译文质检:通过" };
   });
 });
@@ -217,6 +218,18 @@ test("revise 批量:线程回帖与 PR 回帖都被拒(HTTP 403)→ 不静默:�
   const hint = "无法在 PR #9 下回帖:Resource not accessible by integration (HTTP 403),请检查 workflow 的 pull-requests: write 权限";
   assert.ok(r.stderr.includes(hint), r.stderr);
   assert.ok(readLog(summary).includes(`(本次失败原因类别:**模型接口报错**)——${hint}`));
+});
+
+test("revise 批量:译文质检失败 → 不吞掉,PR 下回帖「译文质检未完成」;文档审核只查本次改到的两篇;返工仍判成功", async () => {
+  const ctx = setup();
+  const summary = join(ctx.root, "summary.md");
+  const r = await runRevise(ctx, { GITHUB_STEP_SUMMARY: summary, LLM_MODEL_QA: "qa-truncated-x" });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.gh, /comments\/101\/replies -F body=@\S+\nDone in [0-9a-f]+ ✅/); // 返工本身照常完成
+  assert.match(r.gh, /pr comment 9 --body-file \S+\n⚠️ 译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)/);
+  assert.doesNotMatch(r.gh, /🌐 \*\*译文质检\*\*/);
+  assert.match(readLog(summary), /译文质检未完成\(原因类别:\*\*模型输出被截断\*\*\)/);
+  assert.match(r.stdout, /文档审核:只查本次改动的 2 个文档/);
 });
 
 test("revise 单条(老 workflow 的 pull_request_review_comment 触发):只处理触发的那条,沿用历史提交说明", async () => {

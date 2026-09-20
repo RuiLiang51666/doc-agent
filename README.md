@@ -16,12 +16,12 @@
 - **面向真实仓库布局**:代码路径、文档目录、中英路径规则、源语言都可配置;plan 阶段按 diff 里的标识符给文档打分预筛,在 token 预算内放全文、其余给索引。预筛是确定性的,离线可测,不额外调模型。取 diff 以 GitHub 上该 PR 的提交为准,merge / squash / rebase 三种合并方式都正确。
 - **经得起并发与限流**:同一 PR / Issue 的运行串行(workflow 并发组 / 后端进程内队列);一次 review 的多条意见在一次运行里处理、形成一个提交;推送被别的运行抢先就变基重试;模型限流按指数退避 + 随机抖动重试,总等待有上限。
 - **对标国际标准的文档质量**:写作按 Google / Microsoft 风格指南把关,按 Diátaxis 区分文档类型;译文按 **MQM 类型学**多维质检(准确 / 流畅 / 术语 / 风格 + 严重度分级)。规则全部落在 `prompts/` 里,可审阅、可版本化。
-- **拒绝静默失败**:失败一律归类回帖(超预算 / 模型接口报错 / 模型输出被截断 / 模型输出校验失败 / 推送失败 / 其他异常)——评估失败回到被合并的代码 PR,写初稿失败回到计划 Issue,返工失败回到对应 review 线程;回帖本身被拒(如 403 权限不足)时,日志和 Step Summary 写明原因类别与该检查哪项权限;配置的代码路径没有改动时,也会在日志和 Step Summary 里写明跳过。模型输出被长度截断时绝不把半截 JSON 或半截译文当成功结果。
+- **拒绝静默失败**:失败一律归类回帖(超预算 / 模型接口报错 / 模型输出被截断 / 模型输出校验失败 / 推送失败 / 其他异常)——评估失败回到被合并的代码 PR,写初稿失败回到计划 Issue,返工失败回到对应 review 线程;回帖本身被拒(如 403 权限不足)时,日志和 Step Summary 写明原因类别与该检查哪项权限;配置的代码路径没有改动时,也会在日志和 Step Summary 里写明跳过。模型输出被长度截断时绝不把半截 JSON 或半截译文当成功结果。**提示性步骤(文档审核、译文质检)与译文增量同步转兜底也一样**:失败必须看得见——日志、Step Summary、必要时 PR 回帖写明原因类别,运行结论可以仍判成功,但不许一声不响。
 - **两种部署形态,模型无关**:GitHub Actions 零基建,或 GitHub App + 后端(见 [`server/`](server/))零目标仓库文件;兼容任意 OpenAI 接口,GLM / DeepSeek / Kimi 一行配置切换。
 
 ## 接入(目标仓库三步)
 
-1. **加触发器**:把下面的 workflow 放到目标仓库 `.github/workflows/doc-agent.yml`(把 `OWNER/doc-agent@v1.2.1` 换成本仓库)。代码不在 `src/`、文档不是 `docs/zh` + `docs/en` 的仓库,在 `with:` 里加路径配置,见下文「配置」与两份示例。
+1. **加触发器**:把下面的 workflow 放到目标仓库 `.github/workflows/doc-agent.yml`(把 `OWNER/doc-agent@v1.2.2` 换成本仓库)。代码不在 `src/`、文档不是 `docs/zh` + `docs/en` 的仓库,在 `with:` 里加路径配置,见下文「配置」与两份示例。
 2. **配 key**:目标仓库加 secret `LLM_API_KEY`。
 3. **建标签**:`docs/plan`、`docs/draft` 两个 label(也可让 CI 首次自动建)。
 
@@ -46,7 +46,7 @@ jobs:
     # pull-requests: write 两用:读 PR 的提交与文件列表(取 diff),失败时在被合并的代码 PR 下回帖(read 会 403)
     permissions: { contents: read, issues: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: plan
           github-token: ${{ github.token }}
@@ -64,7 +64,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, issues: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: draft
           github-token: ${{ github.token }}
@@ -81,7 +81,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: revise
           ref: ${{ github.event.pull_request.head.ref }}
@@ -115,7 +115,9 @@ jobs:
 | 输入项 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
 | `llm-retry-max-wait-ms` | `LLM_RETRY_MAX_WAIT_MS` | `180000` | 单次调用遇限流(429、智谱 `1302` / `1303` / `1305`)或 5xx 时,指数退避 + 随机抖动的**累计等待上限**。再等就超限时,按「模型接口报错」如实失败回帖。额度类业务码(欠费 `1113`、当日次数用尽 `1304`、次数上限 `1308`)与其余 4xx 不重试 |
-| `llm-max-tokens` | `LLM_MAX_TOKENS` | 空(接口默认) | 模型单次输出上限。输出被截断(`finish_reason=length`)时按「模型输出被截断」失败回帖,可调大此值或换输出上限更大的模型 |
+| `llm-max-tokens` | `LLM_MAX_TOKENS` | 空(接口默认) | 模型单次输出上限。**整篇翻译与译文质检例外**:这两个长输出阶段始终显式设上限(取本项,没配则 4096),因为接口默认可能只有 1024 token(实测 `glm-4-flash`),长文必被截断。输出被截断(`finish_reason=length`)时按「模型输出被截断」失败回帖 |
+| `llm-timeout-ms` | `LLM_TIMEOUT_MS` | `300000` | 单次模型调用的客户端超时。`glm-4.6` 带思考时,大文档的一次调用实测到过约 210s;超时会中止这次尝试(计进重试次数,日志写「中止,无用量」——被中止那次的 token 接口不返回,服务端却可能照样计费),最多连续 3 次网络类失败后如实失败 |
+| `translate-chunk-chars` | `TRANSLATE_CHUNK_CHARS` | `4000` | 整篇翻译的分块大小(源文档字符数)。按 Markdown 标题切块逐块翻译再拼接,代码围栏内的 `#` 不当标题;任一块被截断就带块号明确失败,半篇译文不落盘 |
 
 ### 路径、语言与预算
 
@@ -181,7 +183,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: read, issues: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: plan
           github-token: ${{ github.token }}
@@ -203,7 +205,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, issues: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: draft
           github-token: ${{ github.token }}
@@ -224,7 +226,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: revise
           ref: ${{ github.event.pull_request.head.ref }}
@@ -252,7 +254,7 @@ jobs:
       cancel-in-progress: false
     permissions: { contents: write, pull-requests: write }
     steps:
-      - uses: OWNER/doc-agent@v1.2.1
+      - uses: OWNER/doc-agent@v1.2.2
         with:
           mode: revise
           ref: ${{ github.event.pull_request.head.ref }}
@@ -288,7 +290,7 @@ test/            # node --test 离线测试
 ## 测试
 
 ```bash
-node --test test/*.test.mjs   # 77 个用例,离线可跑(不调用 LLM、不访问 GitHub)
+node --test test/*.test.mjs   # 101 个用例,离线可跑(不调用 LLM、不访问 GitHub)
 ```
 
 覆盖范围:
@@ -296,7 +298,9 @@ node --test test/*.test.mjs   # 77 个用例,离线可跑(不调用 LLM、不访
 - 路径配置:默认值、Apollo 布局、KWDB 文档布局;新建文档的路径校验(穿越、绝对路径、译文目录、符号链接逃逸);
 - diff 截断与 token 预算、文档预筛打分与 prompt 组装、得分为 0 只进索引;
 - 取 diff 区间:临时仓库里真造 merge / squash / rebase 三种合并,外加拿不到 GitHub 数据时的退回与文件列表核对;
-- 限流退避(429 / 智谱 1302、Retry-After、等待上限)与输出截断检测;
+- 限流退避(429 / 智谱 1302、Retry-After、等待上限)、输出截断检测、客户端超时中止计进重试统计;
+- 整篇翻译按标题分块(用 Apollo 真实的 17K / 25K 字符文档做夹具,mock 模型强制输出上限):切块后完整译出、不切块被识别为截断且不落盘;增量同步失败写明原因再兜底;
+- 文档审核只查本次改动的文档、占位 URL 跳过并注明、工具崩溃不被过滤成空条目;
 - 显式 add 提交、推送被拒后的变基重试与冲突回滚;批量返工挑待处理意见的纯函数;后端队列的串行与合并;
 - search/replace 唯一性:用 Apollo 真实文档(6 行相同的 `export`、4 个同名小标题)验证只给重复行被拒、带区分上下文才成功;
 - plan / draft / revise 端到端(临时 git 仓库 + 裸仓库当远端 + 假 `gh` + 本机 mock 接口):不静默失败(含回帖被 403 拒绝)、幂等跳过、
@@ -309,8 +313,8 @@ node --test test/*.test.mjs   # 77 个用例,离线可跑(不调用 LLM、不访
 - 文档预筛是基于标识符的词法打分,不理解语义:改动只体现在行为上、文档里又没有对应标识符时,相关文档可能只进索引、不附全文。全部文档都在索引里,模型仍可以把它列进计划。token 数是估算值。
 - 计划可以新建文档,但新建路径必须落在 `docs-source-dir` 内(禁止 `..`、绝对路径、符号链接逃逸);侧边栏 / 目录类文件要模型自己列进计划才会改。
 - 返工只处理**行内** review 意见;review 的顶层正文不作为指令。失败回帖后该意见记为「已答复」,要重试就在该线程下再回一条。
-- 大文档仍整篇放进 draft 与翻译的 prompt(没有分段翻译);输出被截断时明确失败,不会写半截译文。
-- 质检扫描的是全仓符合 `docs-glob` 的文件,不是只查本次改动。
+- 大文档仍整篇放进 draft 的 prompt;整篇翻译已按标题分块(`translate-chunk-chars`),但单个小节本身超过输出上限时仍会截断——那时明确失败,不会写半截译文。
+- 文档审核(拼写 / 坏链)只查本次文档 PR 改动的文件;仓库里的存量问题不在扫描范围内。占位 URL(`https://host:port/…`、`<your-domain>`、`example.com`)跳过并在评论里注明。
 - 还没有「文档 PR 合并即触发中英同步」的入口;KWDB 这类纯文档仓库目前经 review 返工触发同步。
 - GitHub App 后端形态的配置对它服务的所有仓库生效(队列与临时目录已按 PR 隔离,但配置仍是进程级)。
 - 目前只有 `/approve` 一个人工指令,评审计划即批准;更细的指令集(改范围/驳回)在路线图上。

@@ -27,14 +27,16 @@ fork 里的 workflow 用 `uses: <你>/doc-agent@<tag>` 引用,所以内核必须
 ```bash
 cd /Users/rui/claude/doc-agent
 git log --oneline -3          # 确认 P0(1c5e664)、P1(e3d0d36)都在
-node --test test/*.test.mjs   # 77 个用例应全过
+node --test test/*.test.mjs   # 101 个用例应全过
 git push origin main
-git tag v1.2.1 && git push origin v1.2.1
+git tag v1.2.2 && git push origin v1.2.2
 ```
 
-打完后把 `apollo-fork-doc-agent.yml` 里三处 `RuiLiang51666/doc-agent@v1.2.1` 改成你的 `<owner>/<repo>@v1.2.1`。想边调边试可以先用 `@main`,稳定了再钉 tag。
+打完后把 `apollo-fork-doc-agent.yml` 里三处 `RuiLiang51666/doc-agent@v1.2.2` 改成你的 `<owner>/<repo>@v1.2.2`。想边调边试可以先用 `@main`,稳定了再钉 tag。
 
-> **已按 v1.2 搭好 fork 的**:v1.2.1 修了 plan job 的权限(`pull-requests` 从 `read` 改为 `write`;只读时,plan 失败在代码 PR 下回帖会被 403 拒绝,原因只留在 Actions 日志里)。推送 `v1.2.1` 后,用新版 `apollo-fork-doc-agent.yml` 覆盖 `replay-base` 上的 `.github/workflows/doc-agent.yml` 并推送(快进,别覆盖已合并的回放提交)。注意:Re-run 旧运行沿用原提交上的 workflow,用不上新权限。
+> **已按 v1.2 搭好 fork 的**:v1.2.1 修了 plan job 的权限(`pull-requests` 从 `read` 改为 `write`;只读时,plan 失败在代码 PR 下回帖会被 403 拒绝,原因只留在 Actions 日志里)。推送 `v1.2.2` 后,用新版 `apollo-fork-doc-agent.yml` 覆盖回放基线分支上的 `.github/workflows/doc-agent.yml` 并推送(快进,别覆盖已合并的回放提交)。注意:Re-run 旧运行沿用原提交上的 workflow,用不上新权限。
+>
+> **v1.2.2 修的是 #5655 首轮 draft 暴露的五件事**:① 英文增量同步失败会写明原因类别再兜底(以前静默);② 整篇翻译按标题切块、每次显式设输出上限,25KB 的文档不再必然被截断,任一块截断就明确失败且不落半篇译文;③ 译文质检失败不再被吞,PR 下回帖「译文质检未完成(原因类别)」;④ 客户端超时默认从 120s 提到 300s(可用 `llm-timeout-ms` 配),超时中止计进重试并写「中止,无用量」;⑤ 文档审核只查本次文档 PR 改动的文件,占位 URL 跳过并注明。
 
 ## 2. [写] 建回放基线分支 `replay-base`,同时处理掉上游 CI
 
@@ -56,7 +58,7 @@ git rm -r -q .github/workflows
 # ② 只放 doc-agent 这一个
 mkdir -p .github/workflows
 cp /Users/rui/claude/doc-agent/examples/apollo-fork-doc-agent.yml .github/workflows/doc-agent.yml
-# 记得先把里面的 RuiLiang51666/doc-agent@v1.2.1 换成你自己的
+# 记得先把里面的 RuiLiang51666/doc-agent@v1.2.2 换成你自己的
 git add .github/workflows/doc-agent.yml
 git commit -m "replay: 只保留 doc-agent workflow,移除上游 CI"
 
@@ -218,14 +220,15 @@ diff -u <scratchpad>/golden/pr-5649/after/docs/zh/deployment/quick-start.md /tmp
 
 ## 附录 B:已知坑与预期现象
 
-- **文档审核(拼写 + 坏链)慢**:`scripts/checklib.mjs` 扫的是全仓符合 `docs-glob` 的文件,Apollo 有 102 个 `.md`,每个都要跑一次 `npx markdown-link-check` 并联网查外链,可能要好几分钟,而且评论里会混进大量存量坏链。它是**提示性**的,失败被吞掉、不阻断流程。这是已知局限(增量质检还没做),演示时可以直接说明。
+- **文档审核(拼写 + 坏链)的范围**:v1.2.2 起只查本次文档 PR 改动的文件(v1.2.1 扫全仓 102 个 `.md`,在 #5655 首轮占掉整次运行 63% 的时间,评论里 319 条坏链几乎都是仓库存量问题)。文档里的占位 URL(如 `https://host:port/...`)会跳过并在评论里注明——它以前会让 `markdown-link-check` 抛 `TypeError: Invalid URL`,把整份文件的检查弄成空条目。审核仍是**提示性**的,不阻断流程,但失败不再被吞:日志与 Step Summary 会写明原因类别。
 - **`CHANGES.md` 会被一起回放**:#5580 / #5655 / #5665 的改动里都有仓库根的 `CHANGES.md`。它不在 `docs/**` 里(所以脚本不剔),也不在 `code-paths` 里(所以模型看不到),对结果中性。脚本会把这类「既不是文档、也不在代码路径里」的文件单独列出来提醒。
 - **`github.token` 创建的 PR 不会再触发 workflow**(GitHub 的防循环机制)。这条链路不受影响:合并回放 PR、评论 `/approve`、提交 review 都是你本人操作。
 - **计划 Issue 是幂等的**:同一个源 PR 已有计划 Issue 时 plan 会跳过。想重跑就先关掉(`--state all` 都算)那个 Issue 再说,或换一个回放 PR。
 - **文档 PR 也是幂等的**:重复 `/approve` 时,若 `docs/plan-<Issue号>` 分支的 PR 已存在就跳过。
 - **重复行上的 search/replace**:#5649 的 `quick-start.md` 有 6 行相同的 `export SPRING_PROFILES_ACTIVE=...` 和 4 个 `#### 注意事项`。draft 的编辑只给其中一行会被拒(报「出现 N 次,必须唯一」,归类「模型输出校验失败」,在计划 Issue 下回帖);提示词已要求带上区分上下文。真遇到了,重新评论 `/approve` 重试即可。
 - **连续回放多个 PR 时的基线**:本手册的 `replay-base` 停在 #5649 的父提交。要接着回放 #5580 / #5655 / #5665,两种走法——(a) 沿用同一条 `replay-base`,每轮先把上一轮的文档 PR 合并回去,再用 `--base replay-base` 应用下一个 PR 的代码(跨过中间的上游提交,可能冲突,脚本会报);(b) 每个 PR 单独建 `replay-base-<N>`(= 该 PR 的父提交 + 那个 workflow 提交)并把默认分支切过去,永不冲突,代价是每轮改一次默认分支。稳妥起见首轮之后建议走 (b)。
-- **模型选择**:默认 `glm-4.6`(上下文 200K),plan 预算 60000 token 有充足余量。换 128K 的模型也够,但别换回 `glm-4-plus`(最大输出只有 4K,大页翻译会被截断——v1.2 起会明确报「模型输出被截断」而不是写半截译文)。
+- **模型选择**:默认 `glm-4.6`(上下文 200K),plan 预算 60000 token 有充足余量。换 128K 的模型也够,但别换回 `glm-4-plus`(最大输出只有 4K,大页翻译会被截断——v1.2 起会明确报「模型输出被截断」而不是写半截译文;v1.2.2 起整篇翻译已按标题切块,单块译文远小于 4K)。
+- **单次调用可能很久**:#5655 首轮实测 `glm-4.6` 单次调用到过 208.6s / 179.6s(带思考),v1.2.1 的 120s 客户端超时会把还在生成的连接掐掉、白跑一轮,被中止那次的 token 也拿不到。v1.2.2 把默认超时提到 300s(`llm-timeout-ms` 可配),并把中止计进重试统计、日志里写明「中止,无用量」。
 
 ## 附录 C:清理与重跑
 
